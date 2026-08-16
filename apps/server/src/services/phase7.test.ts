@@ -149,7 +149,9 @@ async function jobIdsForBatch(batchId: number, jobType?: string): Promise<number
 async function setModelConfig(modelId: string | null): Promise<void> {
   const db = getDatabase();
   const now = new Date();
-  for (const stage of ['TRANSCRIPTION', 'KNOWLEDGE_PROCESSING'] as const) {
+  // All four stages must be configured so the Phase 12 preflight lets the
+  // batch start; tests that exercise a missing model delete it explicitly.
+  for (const stage of ['TRANSCRIPTION', 'KNOWLEDGE_PROCESSING', 'EMBEDDING', 'CONTENT_GENERATION'] as const) {
     if (modelId === null) {
       await db.delete(modelConfigs).where(eq(modelConfigs.stage, stage));
       continue;
@@ -181,6 +183,8 @@ before(async () => {
   await setModelConfig(MODEL_ID);
   await promptsService.saveVersion('TRANSCRIPTION', { content: 'پرامپت تست تبدیل صوت' });
   await promptsService.saveVersion('KNOWLEDGE_PROCESSING', { content: 'پرامپت تست تحلیل دانش' });
+  // Phase 12 preflight requires the content prompt so the batch can start.
+  await promptsService.saveVersion('CONTENT_GENERATION', { content: 'پرامپت تست تولید محتوا' });
   await credentialStore.saveKey('test-key-abc');
 });
 

@@ -1,17 +1,18 @@
-import { ArrowRight, FileAudio, FileText, Play, RefreshCw, ScanLine } from 'lucide-react';
-import { useState } from 'react';
+import { ArrowRight, Ban, FileAudio, FileText, Play, RefreshCw, RotateCcw, ScanLine, TriangleAlert } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ErrorState } from '../components/ErrorState';
 import { LoadingState } from '../components/LoadingState';
 import { PageHeader } from '../components/PageHeader';
 import { SectionCard } from '../components/SectionCard';
 import { StatusBadge, type StatusTone } from '../components/StatusBadge';
-import type { AudioStatus, BatchStatus } from '@freebuff/contracts';
+import type { AudioStatus, BatchJobInfo, BatchStatus, StageProgress } from '@freebuff/contracts';
 import { useBatch } from '../features/batches/useBatch';
 import { BatchDeltaSection } from '../features/knowledge/BatchDeltaSection';
 import { BatchGeneratedContentSection } from '../features/knowledge/BatchGeneratedContentSection';
 import { KnowledgeDecisionsSection } from '../features/knowledge/KnowledgeDecisionsSection';
 import { TranscriptModal } from '../features/transcripts/TranscriptModal';
+import { cancelBatch, fetchBatchJobs, fetchPreflight, retryFailedBatchJobs } from '../lib/api';
 
 const BATCH_TONE: Record<BatchStatus, StatusTone> = {
   CREATED: 'neutral',
@@ -66,6 +67,46 @@ function Stat({ label, value }: { label: string; value: number }) {
   );
 }
 
+const STAGE_LABEL: Record<string, string> = {
+  TRANSCRIPTION: 'تبدیل صوت به متن',
+  KNOWLEDGE_ANALYSIS: 'تحلیل دانش',
+  DELTA_ANALYSIS: 'مقایسهٔ دانش',
+  RECONCILIATION: 'اعمال روی دانش نهایی',
+  KNOWLEDGE_READY: 'آمادهٔ تولید محتوا',
+  CONTENT_GENERATION: 'تولید محتوا',
+  COMPLETED: 'تکمیل شده',
+  PARTIAL_FAILED: 'ناقص',
+  FAILED: 'ناموفق',
+  CANCELLED: 'لغو شده',
+};
+
+function ProgressRow({ label, progress }: { label: string; progress: StageProgress }) {
+  const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : null;
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between text-xs">
+        <span className="text-text-secondary">{label}</span>
+        <span className="text-text-primary">
+          {progress.total > 0 ? `${progress.done} / ${progress.total}` : '—'}
+        </span>
+      </div>
+      {progress.total > 0 && (
+        <div className="h-2 overflow-hidden rounded-full bg-surface-muted">
+          <div className="h-full rounded-full bg-accent transition-all duration-500" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+const JOB_TYPE_LABEL: Record<string, string> = {
+  TRANSCRIPTION: 'تبدیل صوت به متن',
+  KNOWLEDGE_ANALYSIS: 'تحلیل دانش',
+  KNOWLEDGE_DELTA: 'مقایسهٔ دانش',
+  KNOWLEDGE_RECONCILIATION: 'اعمال دانش',
+  CONTENT_GENERATION: 'تولید محتوا',
+};
+
 export function BatchDetailPage() {
   const { id } = useParams<{ id: string }>();
   const batchId = Number(id);
@@ -83,6 +124,44 @@ export function BatchDetailPage() {
     start,
   } = useBatch(batchId);
   const [viewingTranscript, setViewingTranscript] = useState<{ audioId: number; audioName: string } | null>(null);
+  const [failedJobs, setFailedJobs] = useState<BatchJobInfo[]>([]);
+  const [jobsError, setJobsError] = useState<string | null>(null);
+  const [preflightIssues, setPreflightIssues] = useState<string[]>([]);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const loadJobs = useCallback(() => {
+    fetchBatchJobs(batchId)
+      .then((result) => setFailedJobs(result.jobs))
+      .catch((error: unknown) => {
+        setJobsError(error instanceof Error ? error.message : 'خطا در دریافت وضعیت Jobها.');
+      });
+  }, [batchId]);
+
+  // Preflight: show actionable configuration issues before the user starts.
+  useEffect(() => {
+    let cancelled = false;
+    fetchPreflight()
+      .then((result) => {
+        if (!cancelled && !result.ready) {
+          setPreflightIssues(result.issues.map((issue) => issue.message));
+        } else if (!cancelled) {
+          setPreflightIssues([]);
+        }
+      })
+      .catch(() => {
+        // Preflight is advisory — failures here never block the page.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    loadJobs();
+  }, [loadJobs]);
 
   if (isLoading) {
     return <LoadingState label="در حال دریافت جزئیات Batch…" />;
@@ -107,11 +186,43 @@ export function BatchDetailPage() {
   }
 
   const { stats } = batch;
-  const processable = stats.transcribed + stats.transcribing + stats.queuedJobs + stats.failedItems;
-  const done = stats.transcribed;
-  const progressPct =
-    processable > 0 ? Math.round((done / processable) * 100) : 0;
   const canStart = batch.status === 'READY' || batch.status === 'CREATED';
+  const hasFailures = stats.failedItems > 0 || stats.deltaFailed > 0 || stats.reconcileFailed > 0 || stats.contentFailed > 0 || failedJobs.length > 0;
+  const canRetry = hasFailures && batch.status !== 'CANCELLED';
+  const canCancel =
+    ['CREATED', 'SCANNING', 'READY', 'PROCESSING', 'TRANSCRIBING', 'ANALYZING', 'DELTA_PROCESSING', 'RECONCILING', 'GENERATING_CONTENT'].includes(batch.status);
+
+  const handleRetry = async () => {
+    setIsRetrying(true);
+    setActionMessage(null);
+    setActionError(null);
+    try {
+      const result = await retryFailedBatchJobs(batchId);
+      setActionMessage(`Retry شد: ${result.retriedJobs} Job و ${result.retriedAudios} فایل صوتی دوباره به صف اضافه شد.`);
+      await retryLoad();
+      loadJobs();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Retry با خطا مواجه شد.');
+    } finally {
+      setIsRetrying(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!window.confirm('این Batch لغو شود؟ Jobهای در صف لغو می‌شوند؛ دانش نهایی قبلی حذف نمی‌شود.')) return;
+    setIsCancelling(true);
+    setActionMessage(null);
+    setActionError(null);
+    try {
+      await cancelBatch(batchId);
+      setActionMessage('Batch لغو شد. Jobهای در صف لغو شدند.');
+      await retryLoad();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'لغو Batch با خطا مواجه شد.');
+    } finally {
+      setIsCancelling(false);
+    }
+  };
 
   return (
     <>
@@ -141,7 +252,7 @@ export function BatchDetailPage() {
         }
         description={`ایجاد شده: ${formatDate(batch.createdAt)}`}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {canStart && (
               <button
                 type="button"
@@ -151,6 +262,28 @@ export function BatchDetailPage() {
               >
                 <Play className={`size-4 ${isStarting ? 'animate-pulse' : ''}`} aria-hidden="true" />
                 {isStarting ? 'در حال شروع…' : 'شروع پردازش'}
+              </button>
+            )}
+            {canRetry && (
+              <button
+                type="button"
+                onClick={() => void handleRetry()}
+                disabled={isRetrying}
+                className="inline-flex shrink-0 items-center gap-2 rounded-md border border-border bg-surface px-3.5 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RotateCcw className={`size-4 ${isRetrying ? 'animate-pulse' : ''}`} aria-hidden="true" />
+                {isRetrying ? 'در حال Retry…' : 'Retry موارد ناموفق'}
+              </button>
+            )}
+            {canCancel && (
+              <button
+                type="button"
+                onClick={() => void handleCancel()}
+                disabled={isCancelling}
+                className="inline-flex shrink-0 items-center gap-2 rounded-md border border-border bg-surface px-3.5 py-2 text-sm font-medium text-text-primary transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Ban className={`size-4 ${isCancelling ? 'animate-pulse' : ''}`} aria-hidden="true" />
+                {isCancelling ? 'در حال لغو…' : 'لغو Batch'}
               </button>
             )}
             <button
@@ -167,11 +300,26 @@ export function BatchDetailPage() {
       />
 
       <div className="space-y-4">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <StatusBadge tone={BATCH_TONE[batch.status]} label={batch.status} />
+          {batch.currentStage && STAGE_LABEL[batch.currentStage] && (
+            <span className="rounded-md border border-border bg-surface-muted px-2.5 py-1 text-xs text-text-secondary">
+              مرحله: {STAGE_LABEL[batch.currentStage]}
+            </span>
+          )}
           {startError && (
             <p className="text-sm text-danger" role="alert">
               {startError}
+            </p>
+          )}
+          {actionMessage && (
+            <p className="text-sm text-success" role="status">
+              {actionMessage}
+            </p>
+          )}
+          {actionError && (
+            <p className="text-sm text-danger" role="alert">
+              {actionError}
             </p>
           )}
           {rescanMessage && (
@@ -185,6 +333,22 @@ export function BatchDetailPage() {
             </p>
           )}
         </div>
+
+        {preflightIssues.length > 0 && canStart && (
+          <div className="rounded-md border border-warning/30 bg-warning/5 px-4 py-3" role="alert">
+            <div className="flex items-start gap-2">
+              <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden="true" />
+              <div>
+                <p className="text-sm font-medium text-text-primary">پیکربندی کامل نیست — ابتدا این موارد را رفع کنید:</p>
+                <ul className="mt-1 list-inside list-disc space-y-0.5 text-xs text-text-secondary">
+                  {preflightIssues.map((message) => (
+                    <li key={message}>{message}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-6">
           <Stat label="کل فایل‌ها" value={stats.totalAudio} />
@@ -227,19 +391,46 @@ export function BatchDetailPage() {
           <Stat label="ناموفق" value={stats.contentFailed} />
         </div>
 
-        {processable > 0 && (
-          <SectionCard title="پیشرفت پردازش" description={`${done} از ${processable} فایل قابل پردازش تکمیل شده`}>
-            <div className="flex items-center gap-4">
-              <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-surface-muted">
-                <div
-                  className="h-full rounded-full bg-accent transition-all duration-500"
-                  style={{ width: `${progressPct}%` }}
-                />
-              </div>
-              <span className="shrink-0 text-sm font-semibold text-text-primary" dir="ltr">
-                {progressPct}%
-              </span>
-            </div>
+        <SectionCard
+          title="پیشرفت Pipeline"
+          description="پیشرفت واقعی هر مرحله بر اساس دادهٔ Database"
+        >
+          <div className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2">
+            <ProgressRow label="صوت‌ها (Transcription)" progress={batch.progress.transcription} />
+            <ProgressRow label="تحلیل دانش" progress={batch.progress.knowledge} />
+            <ProgressRow label="مقایسهٔ دانش (Delta)" progress={batch.progress.delta} />
+            <ProgressRow label="اعمال روی دانش نهایی" progress={batch.progress.reconciliation} />
+            <ProgressRow label="تولید محتوا" progress={batch.progress.content} />
+          </div>
+        </SectionCard>
+
+        {failedJobs.length > 0 && (
+          <SectionCard
+            title="خطاها"
+            description="Jobهای ناموفق با کد خطا — برای Retry از دکمهٔ بالا استفاده کنید"
+          >
+            {jobsError && <p className="text-sm text-danger">{jobsError}</p>}
+            <ul className="divide-y divide-border">
+              {failedJobs.slice(0, 20).map((job) => (
+                <li key={job.id} className="flex items-start justify-between gap-4 py-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-text-primary">
+                      {JOB_TYPE_LABEL[job.jobType] ?? job.jobType}
+                      <span className="ms-2 text-xs font-normal text-text-muted" dir="ltr">#{job.entityId}</span>
+                    </p>
+                    <p className="mt-0.5 text-xs text-text-secondary">
+                      {job.errorMessage ?? 'خطای نامشخص'}
+                      {job.errorCode && (
+                        <span className="ms-2 font-mono text-text-muted" dir="ltr">
+                          {job.errorCode} · {job.attempt}/{job.maxAttempts}
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                  <StatusBadge tone="danger" label={job.status} />
+                </li>
+              ))}
+            </ul>
           </SectionCard>
         )}
 

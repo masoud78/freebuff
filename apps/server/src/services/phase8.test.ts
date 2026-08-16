@@ -203,7 +203,8 @@ async function transcribedBatch(
 async function setupKnowledgeConfig(): Promise<void> {
   const db = getDatabase();
   const now = new Date();
-  for (const stage of ['TRANSCRIPTION', 'KNOWLEDGE_PROCESSING'] as const) {
+  // All four stages so the Phase 12 preflight lets the batch start.
+  for (const stage of ['TRANSCRIPTION', 'KNOWLEDGE_PROCESSING', 'EMBEDDING', 'CONTENT_GENERATION'] as const) {
     await db
       .insert(modelConfigs)
       .values({ stage, provider: 'GEMINI', modelId: KNOWLEDGE_MODEL, createdAt: now, updatedAt: now })
@@ -214,6 +215,8 @@ async function setupKnowledgeConfig(): Promise<void> {
   }
   await promptsService.saveVersion('TRANSCRIPTION', { content: 'پرامپت تبدیل صوت تست' });
   await promptsService.saveVersion('KNOWLEDGE_PROCESSING', { content: 'پرامپت تحلیل دانش تست' });
+  // Phase 12 preflight requires the content prompt so the batch can start.
+  await promptsService.saveVersion('CONTENT_GENERATION', { content: 'پرامپت تولید محتوا تست' });
   await credentialStore.saveKey('test-key');
 }
 

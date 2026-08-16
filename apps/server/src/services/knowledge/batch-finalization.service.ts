@@ -5,7 +5,16 @@ import { batchDeltaService } from './batch-delta.service.js';
 import { batchContentGenerationService } from '../content/batch-content-generation.service.js';
 import { batchService } from '../batches.service.js';
 
-const PROCESSING_JOB_TYPES = ['TRANSCRIPTION', 'KNOWLEDGE_ANALYSIS', 'KNOWLEDGE_DELTA', 'KNOWLEDGE_RECONCILIATION'] as const;
+const PROCESSING_JOB_TYPES = [
+  'TRANSCRIPTION',
+  'KNOWLEDGE_ANALYSIS',
+  'KNOWLEDGE_DELTA',
+  'KNOWLEDGE_RECONCILIATION',
+  // Phase 12: content jobs are part of a batch's full lifecycle — a batch
+  // with multiple destinations must not be marked COMPLETED while a content
+  // generation is still pending (only ONE destination used to be generated).
+  'CONTENT_GENERATION',
+] as const;
 
 /**
  * BatchFinalizationService (Phase 10, §41–43). When every processing job of a

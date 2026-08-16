@@ -27,23 +27,50 @@ import {
  * never loads a whole destination into the browser at once.
  */
 export class MasterKnowledgeService {
-  /** Bounded list of a destination's master knowledge items (current values). */
+  /**
+   * Bounded list of a destination's master knowledge items (current values).
+   * Phase 12 §22: optional text search (canonical text / entity / attribute)
+   * plus knowledge-type and status filters — never a Gemini call.
+   */
   async listDestinationKnowledge(
     destinationId: number | null,
-    options: { limit?: number; offset?: number } = {},
+    options: {
+      limit?: number;
+      offset?: number;
+      q?: string | null;
+      knowledgeType?: string | null;
+      status?: string | null;
+    } = {},
   ): Promise<{ items: MasterKnowledgeItem[]; total: number }> {
     const db = getDatabase();
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
     const offset = Math.max(options.offset ?? 0, 0);
 
-    const destCondition =
+    const conditions: ReturnType<typeof eq>[] = [];
+    conditions.push(
       destinationId === null
         ? sql`${knowledgeItems.destinationId} IS NULL`
-        : eq(knowledgeItems.destinationId, destinationId);
+        : eq(knowledgeItems.destinationId, destinationId),
+    );
+    const q = options.q?.trim();
+    if (q !== undefined && q.length > 0) {
+      const like = `%${q}%`;
+      conditions.push(
+        sql`(${knowledgeItems.canonicalText} LIKE ${like} OR ${knowledgeItems.entityName} LIKE ${like} OR ${knowledgeItems.attribute} LIKE ${like})`,
+      );
+    }
+    if (options.knowledgeType) {
+      conditions.push(eq(knowledgeItems.knowledgeType, options.knowledgeType));
+    }
+    if (options.status) {
+      conditions.push(eq(knowledgeItems.status, options.status));
+    }
+    const where = and(...conditions);
+
     const totalRow = await db
       .select({ count: sql<number>`count(${knowledgeItems.id})` })
       .from(knowledgeItems)
-      .where(destCondition)
+      .where(where)
       .get();
     const total = Number(totalRow?.count ?? 0);
 
@@ -73,7 +100,7 @@ export class MasterKnowledgeService {
         knowledgeVersions,
         and(eq(knowledgeVersions.knowledgeId, knowledgeItems.id), eq(knowledgeVersions.isCurrent, true)),
       )
-      .where(destCondition)
+      .where(where)
       .orderBy(desc(knowledgeItems.updatedAt))
       .limit(limit)
       .offset(offset);
@@ -281,6 +308,40 @@ export class MasterKnowledgeService {
       createdAt: row.createdAt.toISOString(),
       resolvedAt: row.resolvedAt?.toISOString() ?? null,
     }));
+  }
+
+  /**
+   * Resolve or dismiss a conflict (Phase 12 §20). DISMISS closes the record
+   * without touching master knowledge or versions; RESOLVE with a note is
+   * allowed only for conflicts already matching current truth — the version
+   * history itself is never mutated here.
+   */
+  async resolveConflict(
+    conflictId: number,
+    action: 'DISMISS' | 'RESOLVE',
+    note?: string,
+  ): Promise<{ status: string; resolvedAt: Date | null } | null> {
+    const db = getDatabase();
+    const conflict = await db
+      .select()
+      .from(knowledgeConflicts)
+      .where(eq(knowledgeConflicts.id, conflictId))
+      .get();
+    if (!conflict) return null;
+    if (conflict.status !== 'OPEN') {
+      // Idempotent: already resolved/dismissed — report current state.
+      return { status: conflict.status, resolvedAt: conflict.resolvedAt };
+    }
+    const now = new Date();
+    await db
+      .update(knowledgeConflicts)
+      .set({
+        status: action === 'DISMISS' ? 'DISMISSED' : 'RESOLVED',
+        resolutionNote: note?.trim() || conflict.resolutionNote,
+        resolvedAt: now,
+      })
+      .where(eq(knowledgeConflicts.id, conflictId));
+    return { status: action === 'DISMISS' ? 'DISMISSED' : 'RESOLVED', resolvedAt: now };
   }
 
   /** Publishable change records of a destination (NEW/UPDATE only). */

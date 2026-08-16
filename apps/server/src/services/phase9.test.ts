@@ -277,13 +277,17 @@ before(async () => {
   await settingsService.updateSettings({ workspacePath: dir, processingConcurrency: 2 });
   await promptsService.saveVersion('TRANSCRIPTION', { content: 'پرامپت تست تبدیل صوت' });
   await promptsService.saveVersion('KNOWLEDGE_PROCESSING', { content: 'پرامپت تست تحلیل دانش' });
+  // Phase 12 preflight requires the content prompt so the batch can start.
+  await promptsService.saveVersion('CONTENT_GENERATION', { content: 'پرامپت تست تولید محتوا' });
   await credentialStore.saveKey('test-key');
   const db = getDatabase();
   const now = new Date();
+  // All four stages so the Phase 12 preflight lets the batch start.
   for (const [stage, modelId] of [
     ['TRANSCRIPTION', KNOWLEDGE_MODEL],
     ['KNOWLEDGE_PROCESSING', KNOWLEDGE_MODEL],
     ['EMBEDDING', EMBEDDING_MODEL],
+    ['CONTENT_GENERATION', KNOWLEDGE_MODEL],
   ] as const) {
     await db
       .insert(modelConfigs)

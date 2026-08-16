@@ -3,6 +3,8 @@ import type {
   ApiErrorResponse,
   CandidateRetrievalDebugResponse,
   CandidateStatus,
+  ConflictResolveInput,
+  ConflictResolveResponse,
   DeltaDecision,
   KnowledgeCandidateInfo,
   KnowledgeDecisionsResponse,
@@ -202,16 +204,26 @@ export async function knowledgeRoutes(app: FastifyInstance): Promise<void> {
   // Phase 10 — Master Knowledge, conflicts, changes & batch delta
   // ---------------------------------------------------------------------------
 
-  // Master knowledge of a destination (bounded, destination-scoped).
+  // Master knowledge of a destination (bounded, destination-scoped, with
+  // Phase 12 search + filters).
   app.get(
     '/api/destinations/:id/master-knowledge',
     async (request, reply): Promise<unknown | ApiErrorResponse> => {
       try {
         const { id } = request.params as { id: string };
-        const { limit, offset } = request.query as { limit?: string; offset?: string };
+        const { limit, offset, q, knowledgeType, status } = request.query as {
+          limit?: string;
+          offset?: string;
+          q?: string;
+          knowledgeType?: string;
+          status?: string;
+        };
         const result = await masterKnowledgeService.listDestinationKnowledge(Number(id), {
           limit: limit ? Number(limit) : 50,
           offset: offset ? Number(offset) : 0,
+          q,
+          knowledgeType: knowledgeType && knowledgeType.length > 0 ? knowledgeType : null,
+          status: status && status.length > 0 ? status : null,
         });
         return { destinationId: Number(id), ...result };
       } catch (error) {
@@ -250,6 +262,36 @@ export async function knowledgeRoutes(app: FastifyInstance): Promise<void> {
         return { destinationId: Number(id), conflicts };
       } catch (error) {
         request.log.error({ err: error }, 'Failed to load destination conflicts');
+        return toErrorResponse(reply, error);
+      }
+    },
+  );
+
+  // Resolve or dismiss a conflict (Phase 12 §20 — safe actions only; version
+  // history and master knowledge are never mutated here).
+  app.post(
+    '/api/conflicts/:id/resolve',
+    async (request, reply): Promise<ConflictResolveResponse | ApiErrorResponse> => {
+      try {
+        const { id } = request.params as { id: string };
+        const body = (request.body ?? {}) as ConflictResolveInput;
+        const action = body.action === 'RESOLVE' ? 'RESOLVE' : 'DISMISS';
+        const result = await masterKnowledgeService.resolveConflict(
+          Number(id),
+          action,
+          typeof body.note === 'string' ? body.note : undefined,
+        );
+        if (!result) {
+          reply.code(404);
+          return { error: { code: 'RECONCILIATION_TARGET_NOT_FOUND', message: 'تعارض یافت نشد.' } };
+        }
+        return {
+          conflictId: Number(id),
+          status: result.status as ConflictResolveResponse['status'],
+          resolvedAt: result.resolvedAt?.toISOString() ?? null,
+        };
+      } catch (error) {
+        request.log.error({ err: error }, 'Failed to resolve conflict');
         return toErrorResponse(reply, error);
       }
     },

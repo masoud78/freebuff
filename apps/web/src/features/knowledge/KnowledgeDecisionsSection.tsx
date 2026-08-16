@@ -145,7 +145,11 @@ function CandidateRow({ candidate }: { candidate: KnowledgeCandidateInfo }) {
         <div className="min-w-0 flex-1">
           <p className="text-sm text-text-primary">{candidate.canonicalText}</p>
           <p className="mt-0.5 text-xs text-text-secondary">
-            {candidate.destinationName ? `مقصد: ${candidate.destinationName} · ` : ''}
+            {candidate.destinationName ? (
+              `مقصد: ${candidate.destinationName} · `
+            ) : (
+              <span className="text-amber-600">مقصد: نامشخص (Unresolved) · </span>
+            )}
             <span dir="ltr">#{candidate.id}</span>
             {candidate.valueText ? ` · مقدار: ${candidate.valueText}` : ''}
             {candidate.unit ? ` ${candidate.unit}` : ''}

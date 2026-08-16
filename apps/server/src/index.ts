@@ -1,10 +1,10 @@
 import { buildApp } from './app.js';
 import { initDatabase } from './core/database/index.js';
-import { jobService } from './services/jobs.service.js';
+import { contentWorker } from './services/content/content.worker.js';
 import { deltaWorker } from './services/knowledge/delta.worker.js';
 import { knowledgeWorker } from './services/knowledge/knowledge.worker.js';
 import { reconciliationWorker } from './services/knowledge/reconciliation.worker.js';
-import { contentWorker } from './services/content/content.worker.js';
+import { pipelineRecoveryService } from './services/pipeline-recovery.service.js';
 import { promptsService } from './services/prompts.service.js';
 import { settingsService } from './services/settings.service.js';
 import { transcriptionWorker } from './services/transcription/worker.js';
@@ -20,10 +20,11 @@ try {
   await settingsService.ensureDefaultSettings();
   // Seed the three default prompt templates (idempotent).
   await promptsService.ensureDefaultTemplates();
-  // Recover jobs left RUNNING by a previous crash back to PENDING.
-  const recovered = await jobService.recoverStaleJobs();
-  if (recovered > 0) {
-    console.error(`[startup] recovered ${recovered} stale job(s)`);
+  // Restart recovery (Phase 12 §7): requeue stale RUNNING jobs, heal batches
+  // that were mid-flight, and resume finalization exactly once.
+  const recovery = await pipelineRecoveryService.recover();
+  if (recovery.recoveredJobs > 0 || recovery.healedBatches > 0) {
+    console.error(`[startup] recovery: ${recovery.recoveredJobs} stale job(s), ${recovery.healedBatches} batch(es) healed, ${recovery.finalizedBatches} finalized`);
   }
   const app = buildApp({ loggerOptions: { level: LOG_LEVEL } });
   await app.listen({ port: PORT, host: HOST });

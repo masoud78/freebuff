@@ -1,16 +1,22 @@
 import type {
   AiReadinessResponse,
+  AllTimeUsageResponse,
   ApiErrorCode,
   ApiErrorResponse,
   AppSettings,
+  AudioRetryResponse,
   BatchDeltaResponse,
   BatchDetailResponse,
   BatchDestinationSummaryInfo,
   BatchGeneratedContentsResponse,
+  BatchJobsResponse,
   BatchListResponse,
+  BatchRetryResponse,
   BatchSummary,
   BatchUsageResponse,
+  CancelBatchResponse,
   CandidateRetrievalDebugResponse,
+  ConflictResolveResponse,
   ContentRegenerateResponse,
   DestinationConflictsResponse,
   DestinationContentHistoryResponse,
@@ -26,6 +32,8 @@ import type {
   KnowledgeChangeInfo,
   ModelConfigResponse,
   ModelConfigsResponse,
+  OverviewResponse,
+  PipelinePreflightResponse,
   PromptTemplatesResponse,
   PromptVersionsResponse,
   TranscriptKnowledgeInfo,
@@ -269,14 +277,19 @@ export function fetchDeltaMetrics(batchId: number): Promise<Record<string, numbe
 // Master knowledge, conflicts, changes & batch delta (Phase 10)
 // ---------------------------------------------------------------------------
 
-/** Bounded master knowledge list of a destination. */
+/** Bounded master knowledge list of a destination (search + filters). */
 export function fetchMasterKnowledge(
   destinationId: number,
   limit = 50,
   offset = 0,
+  options: { q?: string; knowledgeType?: string; status?: string } = {},
 ): Promise<DestinationMasterKnowledgeResponse> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (options.q) params.set('q', options.q);
+  if (options.knowledgeType) params.set('knowledgeType', options.knowledgeType);
+  if (options.status) params.set('status', options.status);
   return request<DestinationMasterKnowledgeResponse>(
-    `${API_BASE_URL}/api/destinations/${destinationId}/master-knowledge?limit=${limit}&offset=${offset}`,
+    `${API_BASE_URL}/api/destinations/${destinationId}/master-knowledge?${params.toString()}`,
   );
 }
 
@@ -385,4 +398,63 @@ export function regenerateContent(contentId: number): Promise<ContentRegenerateR
 /** Per-stage token/usage aggregate of a batch (real api_usage data). */
 export function fetchBatchUsage(batchId: number): Promise<BatchUsageResponse> {
   return request<BatchUsageResponse>(`${API_BASE_URL}/api/batches/${batchId}/usage`);
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline preflight, overview, usage & batch operations (Phase 12)
+// ---------------------------------------------------------------------------
+
+/** Configuration readiness for starting batch processing. */
+export function fetchPreflight(): Promise<PipelinePreflightResponse> {
+  return request<PipelinePreflightResponse>(`${API_BASE_URL}/api/pipeline/preflight`);
+}
+
+/** Concise system overview (real statistics only). */
+export function fetchOverview(): Promise<OverviewResponse> {
+  return request<OverviewResponse>(`${API_BASE_URL}/api/overview`);
+}
+
+/** All-time usage across every batch, per stage. */
+export function fetchAllTimeUsage(): Promise<AllTimeUsageResponse> {
+  return request<AllTimeUsageResponse>(`${API_BASE_URL}/api/usage`);
+}
+
+/** Retry every permanently-failed job of a batch. */
+export function retryFailedBatchJobs(batchId: number): Promise<BatchRetryResponse> {
+  return request<BatchRetryResponse>(`${API_BASE_URL}/api/batches/${batchId}/retry-failed`, {
+    method: 'POST',
+  });
+}
+
+/** Retry one failed audio. */
+export function retryAudio(batchId: number, audioId: number): Promise<AudioRetryResponse> {
+  return request<AudioRetryResponse>(
+    `${API_BASE_URL}/api/batches/${batchId}/audio/${audioId}/retry`,
+    { method: 'POST' },
+  );
+}
+
+/** Cancel a batch (pending jobs cancelled; master knowledge intact). */
+export function cancelBatch(batchId: number): Promise<CancelBatchResponse> {
+  return request<CancelBatchResponse>(`${API_BASE_URL}/api/batches/${batchId}/cancel`, {
+    method: 'POST',
+  });
+}
+
+/** Failed jobs of a batch (actionable failure details). */
+export function fetchBatchJobs(batchId: number): Promise<BatchJobsResponse> {
+  return request<BatchJobsResponse>(`${API_BASE_URL}/api/batches/${batchId}/jobs`);
+}
+
+/** Resolve or dismiss an open conflict (safe actions only). */
+export function resolveConflict(
+  conflictId: number,
+  action: 'DISMISS' | 'RESOLVE',
+  note?: string,
+): Promise<ConflictResolveResponse> {
+  return request<ConflictResolveResponse>(`${API_BASE_URL}/api/conflicts/${conflictId}/resolve`, {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ action, note }),
+  });
 }

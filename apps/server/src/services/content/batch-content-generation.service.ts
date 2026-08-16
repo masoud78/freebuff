@@ -4,6 +4,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { getDatabase } from '../../core/database/client.js';
 import {
   apiUsage,
+  batches,
   batchDestinationSummaries,
   deltaMetrics,
   destinations,
@@ -102,7 +103,12 @@ export class BatchContentGenerationService {
       .digest('hex');
   }
 
-  /** Explicit regenerate: bump the generation number and queue a new job. */
+  /**
+   * Explicit regenerate: bump the generation number and queue a new job. The
+   * batch is reopened as GENERATING_CONTENT so the worker picks the job up
+   * even when the batch had already reached COMPLETED; when the new
+   * generation finishes, refreshBatchState settles it back to COMPLETED.
+   */
   async regenerate(
     batchId: number,
     destinationId: number,
@@ -114,6 +120,10 @@ export class BatchContentGenerationService {
       entityId: destinationId,
       idempotencyKey: `CONTENT:${batchId}:${destinationId}:${nextGen}`,
     });
+    await getDatabase()
+      .update(batches)
+      .set({ status: 'GENERATING_CONTENT', completedAt: null, updatedAt: new Date() })
+      .where(eq(batches.id, batchId));
     return { destinationId, generationNumber: nextGen, queued: true };
   }
 

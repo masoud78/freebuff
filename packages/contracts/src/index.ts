@@ -136,6 +136,7 @@ export const apiErrorCodes = [
   'MODEL_CONFIG_INVALID',
   'PROMPT_NOT_FOUND',
   'PROMPT_INVALID',
+  'PIPELINE_NOT_READY',
   ...batchErrorCodes,
   ...transcriptionErrorCodes,
   ...knowledgeErrorCodes,
@@ -298,6 +299,113 @@ export interface AiReadinessResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Pipeline preflight & overview (Phase 12)
+// ---------------------------------------------------------------------------
+
+/** One actionable configuration issue found by the pipeline preflight. */
+export interface PipelinePreflightIssue {
+  /** Stable machine key, e.g. `model_transcription`, `prompt_content_generation`. */
+  key: string;
+  /** Short label, e.g. «مدل تبدیل صوت به متن». */
+  label: string;
+  /** Actionable Persian message shown in the UI. */
+  message: string;
+}
+
+export interface PipelinePreflightResponse {
+  ready: boolean;
+  issues: PipelinePreflightIssue[];
+}
+
+export interface OverviewBatchInfo {
+  id: number;
+  status: BatchStatus;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  currentStage: string | null;
+  totalAudio: number;
+  transcribed: number;
+  contentGenerated: number;
+}
+
+/** Real all-time usage aggregates (Phase 12 §29). */
+export type AllTimeUsageResponse = Partial<Record<ApiUsageStage, UsageStageSummary>>;
+
+export interface OverviewResponse {
+  ready: boolean;
+  readinessIssues: PipelinePreflightIssue[];
+  destinationsCount: number;
+  masterKnowledgeCount: number;
+  openConflictsCount: number;
+  totalBatches: number;
+  processingBatches: number;
+  recentBatches: OverviewBatchInfo[];
+  usage: AllTimeUsageResponse;
+}
+
+// ---------------------------------------------------------------------------
+// Batch jobs, retry & cancel (Phase 12)
+// ---------------------------------------------------------------------------
+
+export interface BatchJobInfo {
+  id: number;
+  jobType: JobType;
+  entityId: number;
+  status: JobStatus;
+  attempt: number;
+  maxAttempts: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface BatchJobsResponse {
+  batchId: number;
+  jobs: BatchJobInfo[];
+}
+
+export interface BatchRetryResponse {
+  batchId: number;
+  retriedJobs: number;
+  retriedAudios: number;
+  status: BatchStatus;
+}
+
+export interface AudioRetryResponse {
+  batchId: number;
+  audioId: number;
+  retried: boolean;
+  status: BatchStatus;
+}
+
+export interface CancelBatchResponse {
+  batchId: number;
+  cancelled: boolean;
+  cancelledJobs: number;
+  status: BatchStatus;
+}
+
+// ---------------------------------------------------------------------------
+// Conflict resolution (Phase 12 §20)
+// ---------------------------------------------------------------------------
+
+export const conflictResolutionActions = ['DISMISS', 'RESOLVE'] as const;
+export type ConflictResolutionAction = (typeof conflictResolutionActions)[number];
+
+export interface ConflictResolveInput {
+  action: ConflictResolutionAction;
+  note?: string;
+}
+
+export interface ConflictResolveResponse {
+  conflictId: number;
+  status: ConflictStatus;
+  resolvedAt: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Batches / audio ingestion / jobs
 // ---------------------------------------------------------------------------
 
@@ -349,6 +457,24 @@ export const SUPPORTED_AUDIO_EXTENSIONS = [
   '.flac',
   '.webm',
 ] as const;
+
+/** Progress of one pipeline stage, derived from real database data. */
+export interface StageProgress {
+  /** Completed count (e.g. transcribed audios). */
+  done: number;
+  /** Total countable items (0 when the stage has nothing to do). */
+  total: number;
+}
+
+/** Real per-stage progress of a batch (never fabricated percentages). */
+export interface BatchProgress {
+  audio: StageProgress;
+  transcription: StageProgress;
+  knowledge: StageProgress;
+  delta: StageProgress;
+  reconciliation: StageProgress;
+  content: StageProgress;
+}
 
 export interface BatchStats {
   totalAudio: number;
@@ -402,6 +528,10 @@ export interface BatchStats {
 export interface BatchSummary {
   id: number;
   status: BatchStatus;
+  /** Human stage of the current status (TRANSCRIPTION → CONTENT_GENERATION). */
+  currentStage: string | null;
+  /** Real per-stage progress derived from database counts. */
+  progress: BatchProgress;
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;

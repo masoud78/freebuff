@@ -1,7 +1,8 @@
-import { ArrowRight, MapPin, RefreshCw } from 'lucide-react';
+import { ArrowRight, MapPin, RefreshCw, Search, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type {
+  DestinationContentHistoryResponse,
   DestinationDetailResponse,
   KnowledgeChangeInfo,
   KnowledgeConflictInfo,
@@ -20,8 +21,8 @@ import {
   fetchDestinationConflicts,
   fetchDestinationContentHistory,
   fetchMasterKnowledge,
+  resolveConflict,
 } from '../lib/api';
-import type { DestinationContentHistoryResponse } from '@freebuff/contracts';
 
 const STATUS_TONE: Record<DestinationDetailResponse['status'], StatusTone> = {
   PROVISIONAL: 'warning',
@@ -71,6 +72,28 @@ export function DestinationDetailPage() {
   const [selectedKnowledgeId, setSelectedKnowledgeId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [isMasterLoading, setIsMasterLoading] = useState(false);
+  const [conflictActionId, setConflictActionId] = useState<number | null>(null);
+
+  const loadMaster = useCallback(async (q = '', type = '', status = '') => {
+    setIsMasterLoading(true);
+    try {
+      const master = await fetchMasterKnowledge(destinationId, 100, 0, {
+        q: q || undefined,
+        knowledgeType: type || undefined,
+        status: status || undefined,
+      });
+      setMasterItems(master.items);
+      setMasterTotal(master.total);
+    } catch {
+      // Silent — the page-level error already covers initial load failures.
+    } finally {
+      setIsMasterLoading(false);
+    }
+  }, [destinationId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -125,6 +148,29 @@ export function DestinationDetailPage() {
       })
       .finally(() => setIsLoading(false));
   }, [destinationId]);
+
+  // Debounced master-knowledge search (never a Gemini call).
+  useEffect(() => {
+    if (isLoading) return;
+    const timer = window.setTimeout(() => {
+      void loadMaster(search, typeFilter, statusFilter);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [search, typeFilter, statusFilter, isLoading, loadMaster]);
+
+  const dismissConflict = async (conflictId: number) => {
+    setConflictActionId(conflictId);
+    try {
+      await resolveConflict(conflictId, 'DISMISS', 'رد دستی توسط کاربر');
+      const updated = await fetchDestinationConflicts(destinationId);
+      setConflicts(updated.conflicts);
+    } catch (error) {
+      // Surface a light inline error via the page state.
+      setLoadError(error instanceof Error ? error.message : 'رد تعارض با خطا مواجه شد.');
+    } finally {
+      setConflictActionId(null);
+    }
+  };
 
   if (isLoading) {
     return <LoadingState label="در حال دریافت مقصد…" />;
@@ -204,6 +250,58 @@ export function DestinationDetailPage() {
           title="Master Knowledge"
           description={`${masterTotal} مورد دانش نهایی و معتبر این مقصد — برای مشاهده نسخه‌ها و شواهد کلیک کنید`}
         >
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            <div className="relative min-w-0 flex-1">
+              <Search className="pointer-events-none absolute start-2.5 top-1/2 size-3.5 -translate-y-1/2 text-text-muted" aria-hidden="true" />
+              <input
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="جستجو در دانش…"
+                className="w-full rounded-md border border-border bg-surface py-1.5 pe-8 ps-8 text-sm text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+                aria-label="جستجو در دانش"
+              />
+              {search && (
+                <button
+                  type="button"
+                  onClick={() => setSearch('')}
+                  className="absolute end-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary"
+                  aria-label="پاک کردن جستجو"
+                >
+                  <X className="size-3.5" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+            <select
+              value={typeFilter}
+              onChange={(event) => setTypeFilter(event.target.value)}
+              className="rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs text-text-primary focus:border-accent focus:outline-none"
+              aria-label="فیلتر نوع دانش"
+            >
+              <option value="">همهٔ انواع</option>
+              {(Object.keys(KNOWLEDGE_TYPE_LABEL) as KnowledgeType[]).map((type) => (
+                <option key={type} value={type}>
+                  {KNOWLEDGE_TYPE_LABEL[type]}
+                </option>
+              ))}
+            </select>
+            <select
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+              className="rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs text-text-primary focus:border-accent focus:outline-none"
+              aria-label="فیلتر وضعیت"
+            >
+              <option value="">همهٔ وضعیت‌ها</option>
+              <option value="ACTIVE">ACTIVE</option>
+              <option value="PROVISIONAL">PROVISIONAL</option>
+              <option value="ARCHIVED">ARCHIVED</option>
+            </select>
+            {isMasterLoading && (
+              <span className="text-xs text-text-muted" role="status">
+                در حال جستجو…
+              </span>
+            )}
+          </div>
           {masterItems.length === 0 ? (
             <p className="py-6 text-center text-sm text-text-secondary">
               هنوز دانش نهایی (Reconciled) برای این مقصد وجود ندارد.
@@ -350,10 +448,22 @@ export function DestinationDetailPage() {
                     <p className="text-sm text-text-primary" dir="auto">
                       {conflict.candidateCanonicalText}
                     </p>
-                    <StatusBadge
-                      tone={conflict.status === 'OPEN' ? 'danger' : conflict.status === 'RESOLVED' ? 'success' : 'neutral'}
-                      label={conflict.status}
-                    />
+                    <div className="flex shrink-0 items-center gap-2">
+                      {conflict.status === 'OPEN' && (
+                        <button
+                          type="button"
+                          onClick={() => void dismissConflict(conflict.id)}
+                          disabled={conflictActionId === conflict.id}
+                          className="rounded-md border border-border px-2.5 py-1 text-xs text-text-primary transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {conflictActionId === conflict.id ? 'در حال رد…' : 'رد این تعارض'}
+                        </button>
+                      )}
+                      <StatusBadge
+                        tone={conflict.status === 'OPEN' ? 'danger' : conflict.status === 'RESOLVED' ? 'success' : 'neutral'}
+                        label={conflict.status}
+                      />
+                    </div>
                   </div>
                   <p className="mt-1 text-xs text-text-muted">
                     {conflict.existingValue !== null && (

@@ -219,24 +219,32 @@ export type TranscriptSegmentRow = typeof transcriptSegments.$inferSelect;
 export type NewTranscriptSegmentRow = typeof transcriptSegments.$inferInsert;
 
 /** Real Gemini API usage records (source of truth for future usage UI). */
-export const apiUsage = sqliteTable('api_usage', {
-  id: integer('id').primaryKey(),
-  batchId: integer('batch_id'),
-  jobId: integer('job_id'),
-  audioId: integer('audio_id'),
-  /** Destination-scoped stage (e.g. CONTENT generations). Null when N/A. */
-  destinationId: integer('destination_id'),
-  stage: text('stage').notNull(),
-  modelId: text('model_id'),
-  inputTokens: integer('input_tokens'),
-  outputTokens: integer('output_tokens'),
-  cachedTokens: integer('cached_tokens'),
-  totalTokens: integer('total_tokens'),
-  durationMs: integer('duration_ms').notNull(),
-  status: text('status').notNull().default('SUCCESS'),
-  errorCode: text('error_code'),
-  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
-});
+export const apiUsage = sqliteTable(
+  'api_usage',
+  {
+    id: integer('id').primaryKey(),
+    batchId: integer('batch_id'),
+    jobId: integer('job_id'),
+    audioId: integer('audio_id'),
+    /** Destination-scoped stage (e.g. CONTENT generations). Null when N/A. */
+    destinationId: integer('destination_id'),
+    stage: text('stage').notNull(),
+    modelId: text('model_id'),
+    inputTokens: integer('input_tokens'),
+    outputTokens: integer('output_tokens'),
+    cachedTokens: integer('cached_tokens'),
+    totalTokens: integer('total_tokens'),
+    durationMs: integer('duration_ms').notNull(),
+    status: text('status').notNull().default('SUCCESS'),
+    errorCode: text('error_code'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    // Phase 12: usage is queried per batch (and per stage) from the UI.
+    index('api_usage_batch_stage_idx').on(table.batchId, table.stage),
+    index('api_usage_destination_idx').on(table.destinationId),
+  ],
+);
 
 export type ApiUsageRow = typeof apiUsage.$inferSelect;
 export type NewApiUsageRow = typeof apiUsage.$inferInsert;

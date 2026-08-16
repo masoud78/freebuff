@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-migrations.mjs",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/core/database/database.test.ts src/services/settings.test.ts src/services/phase5.test.ts src/services/phase6.test.ts src/services/phase7.test.ts src/services/phase8.test.ts src/services/phase9.test.ts src/services/phase10.test.ts src/services/phase11.test.ts",
+    "test": "tsx --test src/core/database/database.test.ts src/services/settings.test.ts src/services/phase5.test.ts src/services/phase6.test.ts src/services/phase7.test.ts src/services/phase8.test.ts src/services/phase9.test.ts src/services/phase10.test.ts src/services/phase11.test.ts src/services/phase12.test.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/core/database/migrate.ts",
     "db:studio": "drizzle-kit studio"

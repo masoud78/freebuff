@@ -1,12 +1,14 @@
 import type {
   AudioFileInfo,
   BatchDetailResponse,
+  BatchProgress,
   BatchStats,
   BatchStatus,
   BatchSummary,
   ScanResult,
+  StageProgress,
 } from '@freebuff/contracts';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { getDatabase } from '../core/database/client.js';
 import {
   audioFiles,
@@ -21,12 +23,84 @@ import { candidatesService } from './knowledge/candidates.service.js';
 import { DomainError } from './errors.js';
 import { jobService } from './jobs.service.js';
 import { getWorkspaceAudioDir } from './workspace-paths.js';
+import { pipelinePreflightService } from './pipeline-preflight.service.js';
 
 const MESSAGES = {
   notFound: 'Batch پیدا نشد.',
   database: 'خطا در ذخیره Batch. دوباره تلاش کنید.',
   scan: 'خطا در Scan پوشه صوتی. دوباره تلاش کنید.',
 } as const;
+
+const STAGE_BY_STATUS: Partial<Record<BatchStatus, string>> = {
+  PROCESSING: 'TRANSCRIPTION',
+  TRANSCRIBING: 'TRANSCRIPTION',
+  ANALYZING: 'KNOWLEDGE_ANALYSIS',
+  DELTA_PROCESSING: 'DELTA_ANALYSIS',
+  RECONCILING: 'RECONCILIATION',
+  KNOWLEDGE_READY: 'KNOWLEDGE_READY',
+  ANALYSIS_COMPLETED: 'KNOWLEDGE_READY',
+  GENERATING_CONTENT: 'CONTENT_GENERATION',
+  COMPLETED: 'COMPLETED',
+  PARTIAL_FAILED: 'PARTIAL_FAILED',
+  FAILED: 'FAILED',
+  CANCELLED: 'CANCELLED',
+};
+
+/** Human stage label of a batch status (Phase 12 §5). */
+export function currentStageOf(status: BatchStatus): string | null {
+  return STAGE_BY_STATUS[status] ?? null;
+}
+
+/** Real per-stage progress of a batch, derived only from database counts. */
+async function computeProgress(batchId: number): Promise<BatchProgress> {
+  const db = getDatabase();
+  const countByTypeStatus = async (jobType: string): Promise<{ done: number; total: number }> => {
+    const rows = await db
+      .select({ status: jobs.status, count: sql<number>`count(${jobs.id})` })
+      .from(jobs)
+      .where(and(eq(jobs.batchId, batchId), eq(jobs.jobType, jobType)))
+      .groupBy(jobs.status);
+    let done = 0;
+    let total = 0;
+    for (const row of rows) {
+      const count = Number(row.count);
+      total += count;
+      if (row.status === 'COMPLETED') done += count;
+    }
+    return { done, total };
+  };
+
+  const audio = await db
+    .select({ status: audioFiles.status, count: sql<number>`count(${audioFiles.id})` })
+    .from(audioFiles)
+    .where(eq(audioFiles.batchId, batchId))
+    .groupBy(audioFiles.status);
+  let audioTotal = 0;
+  let audioDone = 0;
+  for (const row of audio) {
+    const count = Number(row.count);
+    if (row.status === 'REGISTERED' || row.status === 'QUEUED' || row.status === 'TRANSCRIBING' || row.status === 'TRANSCRIBED' || row.status === 'FAILED') {
+      audioTotal += count;
+      if (row.status === 'TRANSCRIBED') audioDone += count;
+    }
+  }
+
+  const transcription = await countByTypeStatus('TRANSCRIPTION');
+  const knowledge = await countByTypeStatus('KNOWLEDGE_ANALYSIS');
+  const delta = await countByTypeStatus('KNOWLEDGE_DELTA');
+  const reconciliation = await countByTypeStatus('KNOWLEDGE_RECONCILIATION');
+  const content = await countByTypeStatus('CONTENT_GENERATION');
+
+  const sp = (p: { done: number; total: number }): StageProgress => ({ done: p.done, total: p.total });
+  return {
+    audio: { done: audioDone, total: audioTotal },
+    transcription: sp(transcription),
+    knowledge: sp(knowledge),
+    delta: sp(delta),
+    reconciliation: sp(reconciliation),
+    content: sp(content),
+  };
+}
 
 /** Compute per-batch statistics from the database. */
 async function computeStats(batchId: number): Promise<BatchStats> {
@@ -117,10 +191,26 @@ async function computeStats(batchId: number): Promise<BatchStats> {
   };
 }
 
-function toSummary(row: typeof batches.$inferSelect, stats: BatchStats): BatchSummary {
+const EMPTY_PROGRESS: BatchProgress = {
+  audio: { done: 0, total: 0 },
+  transcription: { done: 0, total: 0 },
+  knowledge: { done: 0, total: 0 },
+  delta: { done: 0, total: 0 },
+  reconciliation: { done: 0, total: 0 },
+  content: { done: 0, total: 0 },
+};
+
+function toSummary(
+  row: typeof batches.$inferSelect,
+  stats: BatchStats,
+  progress: BatchProgress = EMPTY_PROGRESS,
+): BatchSummary {
+  const status = row.status as BatchStatus;
   return {
     id: row.id,
-    status: row.status as BatchStatus,
+    status,
+    currentStage: currentStageOf(status),
+    progress,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     startedAt: row.startedAt?.toISOString() ?? null,
@@ -350,6 +440,16 @@ export class BatchService {
    */
   async refreshBatchState(batchId: number): Promise<BatchStatus> {
     const db = getDatabase();
+    const current = await db
+      .select({ status: batches.status })
+      .from(batches)
+      .where(eq(batches.id, batchId))
+      .get();
+    // CANCELLED is terminal: an in-flight job finishing after a cancel must
+    // not resurrect the batch (Phase 12 §36).
+    if (current?.status === 'CANCELLED') {
+      return 'CANCELLED';
+    }
     const stats = await computeStats(batchId);
     const counts = await this.jobStatusCounts(batchId);
     const knowledge = {
@@ -457,7 +557,11 @@ export class BatchService {
     return status;
   }
 
-  /** Mark a READY batch as PROCESSING and return it (worker picks it up). */
+  /**
+   * Mark a READY batch as PROCESSING and return it (worker picks it up).
+   * Refuses to start when the pipeline configuration is incomplete (Phase 12
+   * §11–12) so permanent configuration failures never enter the job engine.
+   */
   async startBatch(batchId: number): Promise<BatchDetailResponse> {
     const batch = await this.requireBatch(batchId);
     if (batch.status === 'CREATED') {
@@ -468,6 +572,15 @@ export class BatchService {
         'BATCH_NOT_STARTABLE',
         'این Batch در وضعیتی نیست که بتوان پردازش را شروع کرد.',
       );
+    }
+    const preflight = await pipelinePreflightService.checkPreflight();
+    if (!preflight.ready) {
+      const first = preflight.issues[0];
+      const message =
+        first !== undefined
+          ? `پیکربندی کامل نیست: ${first.message}`
+          : 'پیکربندی کامل نیست؛ ابتدا تنظیمات را تکمیل کنید.';
+      throw new DomainError('PIPELINE_NOT_READY', message);
     }
     const db = getDatabase();
     await db
@@ -546,7 +659,7 @@ export class BatchService {
       };
     });
 
-    return { ...toSummary(batch, stats), audio };
+    return { ...toSummary(batch, stats, await computeProgress(batchId)), audio };
   }
 
   async listBatches(): Promise<BatchSummary[]> {
@@ -554,9 +667,202 @@ export class BatchService {
     const rows = await db.select().from(batches).orderBy(desc(batches.id));
     const summaries: BatchSummary[] = [];
     for (const row of rows) {
-      summaries.push(toSummary(row, await computeStats(row.id)));
+      summaries.push(toSummary(row, await computeStats(row.id), await computeProgress(row.id)));
     }
     return summaries;
+  }
+
+  /**
+   * Retry every permanently-failed job of a batch (Phase 12 §9–10). Failed
+   * audio rows go back to QUEUED so the UI reflects the new attempt; the
+   * batch reopens as PROCESSING so workers pick the jobs up again. Never
+   * touches COMPLETED jobs, master knowledge, or content history.
+   */
+  async retryFailedJobs(batchId: number): Promise<{ retriedJobs: number; retriedAudios: number; status: BatchStatus }> {
+    const batch = await this.requireBatch(batchId);
+    if (batch.status === 'CANCELLED') {
+      throw new DomainError('BATCH_NOT_STARTABLE', 'این Batch لغو شده است و قابل Retry نیست.');
+    }
+    const db = getDatabase();
+    const now = new Date();
+
+    const failedJobs = await db
+      .select()
+      .from(jobs)
+      .where(and(eq(jobs.batchId, batchId), eq(jobs.status, 'FAILED')));
+    const retryableTypes = new Set([
+      'TRANSCRIPTION',
+      'KNOWLEDGE_ANALYSIS',
+      'KNOWLEDGE_DELTA',
+      'KNOWLEDGE_RECONCILIATION',
+      'CONTENT_GENERATION',
+    ]);
+    const toRetry = failedJobs.filter((job) => retryableTypes.has(job.jobType));
+    if (toRetry.length > 0) {
+      await db
+        .update(jobs)
+        .set({
+          status: 'PENDING',
+          attempt: 0,
+          errorCode: null,
+          errorMessage: null,
+          lockedAt: null,
+          nextAttemptAt: null,
+          completedAt: null,
+          updatedAt: now,
+        })
+        .where(inArray(jobs.id, toRetry.map((job) => job.id)));
+    }
+
+    // Failed audio files become QUEUED again so their transcription job (now
+    // PENDING) is picked up and the UI shows a fresh attempt.
+    const failedAudios = await db
+      .select({ id: audioFiles.id })
+      .from(audioFiles)
+      .where(and(eq(audioFiles.batchId, batchId), eq(audioFiles.status, 'FAILED')));
+    const audioIds = failedAudios.map((row) => row.id);
+    if (audioIds.length > 0) {
+      await db
+        .update(audioFiles)
+        .set({ status: 'QUEUED', updatedAt: now })
+        .where(inArray(audioFiles.id, audioIds));
+    }
+
+    // Nothing failed → no-op; never reopen a clean/terminal batch.
+    if (toRetry.length === 0 && audioIds.length === 0) {
+      return {
+        retriedJobs: 0,
+        retriedAudios: 0,
+        status: batch.status as BatchStatus,
+      };
+    }
+
+    // Reopen the batch so workers can claim the requeued jobs.
+    await db
+      .update(batches)
+      .set({ status: 'PROCESSING', completedAt: null, updatedAt: now })
+      .where(eq(batches.id, batchId));
+
+    return {
+      retriedJobs: toRetry.length,
+      retriedAudios: audioIds.length,
+      status: 'PROCESSING',
+    };
+  }
+
+  /** Retry one failed audio: reset its audio status and requeue its job. */
+  async retryAudio(batchId: number, audioId: number): Promise<{ retried: boolean; status: BatchStatus }> {
+    const batch = await this.requireBatch(batchId);
+    if (batch.status === 'CANCELLED') {
+      throw new DomainError('BATCH_NOT_STARTABLE', 'این Batch لغو شده است و قابل Retry نیست.');
+    }
+    const db = getDatabase();
+    const audio = await db
+      .select()
+      .from(audioFiles)
+      .where(and(eq(audioFiles.id, audioId), eq(audioFiles.batchId, batchId)))
+      .get();
+    if (!audio) {
+      throw new DomainError('AUDIO_FILE_NOT_FOUND', 'فایل صوتی یافت نشد.');
+    }
+    if (audio.status === 'DUPLICATE' || audio.status === 'TRANSCRIBED') {
+      return { retried: false, status: batch.status as BatchStatus };
+    }
+
+    const now = new Date();
+    await db
+      .update(audioFiles)
+      .set({ status: 'QUEUED', updatedAt: now })
+      .where(eq(audioFiles.id, audioId));
+
+    const failedJob = await db
+      .select()
+      .from(jobs)
+      .where(
+        and(
+          eq(jobs.batchId, batchId),
+          eq(jobs.jobType, 'TRANSCRIPTION'),
+          eq(jobs.entityId, audioId),
+          eq(jobs.status, 'FAILED'),
+        ),
+      )
+      .get();
+    if (failedJob) {
+      await db
+        .update(jobs)
+        .set({
+          status: 'PENDING',
+          attempt: 0,
+          errorCode: null,
+          errorMessage: null,
+          lockedAt: null,
+          nextAttemptAt: null,
+          completedAt: null,
+          updatedAt: now,
+        })
+        .where(eq(jobs.id, failedJob.id));
+    } else {
+      // A failed audio without a transcription job (crash edge) gets one.
+      await jobService.createJob({
+        batchId,
+        jobType: 'TRANSCRIPTION',
+        entityId: audioId,
+        idempotencyKey: `TRANSCRIPTION:${audioId}`,
+      });
+    }
+
+    await db
+      .update(batches)
+      .set({ status: 'PROCESSING', completedAt: null, updatedAt: now })
+      .where(eq(batches.id, batchId));
+    return { retried: true, status: 'PROCESSING' };
+  }
+
+  /**
+   * Cancel a batch (Phase 12 §36): cancel pending jobs, stop new ones, keep
+   * already-completed master knowledge and content intact. Running requests
+   * finish; their result is applied but the batch stays CANCELLED.
+   */
+  async cancelBatch(batchId: number): Promise<{ cancelledJobs: number; status: BatchStatus }> {
+    const batch = await this.requireBatch(batchId);
+    const terminal = ['COMPLETED', 'FAILED', 'PARTIAL_FAILED', 'CANCELLED'].includes(batch.status);
+    if (terminal) {
+      return { cancelledJobs: 0, status: batch.status as BatchStatus };
+    }
+    const db = getDatabase();
+    const now = new Date();
+    const cancelled = await db
+      .update(jobs)
+      .set({ status: 'CANCELLED', lockedAt: null, updatedAt: now })
+      .where(and(eq(jobs.batchId, batchId), eq(jobs.status, 'PENDING')))
+      .returning({ id: jobs.id });
+    await db
+      .update(batches)
+      .set({ status: 'CANCELLED', completedAt: now, updatedAt: now })
+      .where(eq(batches.id, batchId));
+    return { cancelledJobs: cancelled.length, status: 'CANCELLED' };
+  }
+
+  /** Failed jobs of a batch (actionable failures for the Batch UI). */
+  async listBatchJobs(batchId: number): Promise<{
+    id: number;
+    jobType: string;
+    entityId: number;
+    status: string;
+    attempt: number;
+    maxAttempts: number;
+    errorCode: string | null;
+    errorMessage: string | null;
+    createdAt: Date;
+    completedAt: Date | null;
+  }[]> {
+    const db = getDatabase();
+    await this.requireBatch(batchId);
+    return db
+      .select()
+      .from(jobs)
+      .where(and(eq(jobs.batchId, batchId), eq(jobs.status, 'FAILED')))
+      .orderBy(jobs.updatedAt);
   }
 
   private async requireBatch(batchId: number) {

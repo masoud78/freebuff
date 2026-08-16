@@ -121,6 +121,48 @@ Batch Knowledge Delta → Gemini (CONTENT_GENERATION) → Generated Content
 - **Usage و Optimization:** هر Call Content در `api_usage` با `stage=CONTENT` و `destination_id` ثبت می‌شود (توکن‌های واقعی SDK). UI Batch بخش‌های Usage (جمع Stage-based) و Optimization (فقط متریک‌های واقعی: Exact Confirmations، Cache Hits، Skips، مقصدهای بدون Delta، Calls، Reuse) را نشان می‌دهد — هیچ تخمین قیمتی.
 - **UI:** Batch Detail بخش «Generated Content» (نسخه‌ها، Copy، Regenerate، پیام «دانش جدید قابل انتشار پیدا نشد» برای مقصدهای بدون Delta) و Destination Detail بخش تاریخچهٔ Content به تفکیک Batch.
 
+## Integration & Reliability (Phase 12)
+
+فاز ۱۲ Feature جدید اضافه نکرد — کل Pipeline را به یک Application نهایی و قابل استفاده تبدیل کرد:
+
+### Pipeline Orchestration
+
+اتصال Stageها کاملاً **Database-driven** از طریق SQLite Job Engine است (Kafka/Redis/Event Bus ساخته نشده): هر Worker بعد از اتمام Job خودش، Jobهای مرحلهٔ بعد را در همان Transaction می‌سازد؛ `BatchFinalizationService` وقتی همهٔ Jobهای Batch Terminal شدند Summary را بازسازی و Jobهای Content را می‌سازد. کاربر فقط Scan + Start می‌زند — بقیه خودکار است.
+
+### Restart Recovery (`PipelineRecoveryService`)
+
+در Startup: (۱) Jobهای RUNNING مانده → PENDING (`recoverStaleJobs`)، (۲) Batchهای نیمه‌کاره با `refreshBatchState` از DB بازسازی می‌شوند، (۳) حالت‌های KNOWLEDGE_READY/ANALYSIS_COMPLETED دوباره Finalize می‌شوند (ایدم‌پوتنت — کار موفق هرگز تکرار نمی‌شود).
+
+### Preflight (`PipelinePreflightService`)
+
+قبل از Start، `startBatch` بررسی می‌کند: کلید Gemini، هر ۴ مدل (Transcription/Knowledge/Embedding/Content)، هر ۳ پرامپت فعال، و Workspace قابل استفاده. اگر ناقص باشد Batch Start نمی‌شود و UI پیام‌های Actionable فارسی نشان می‌دهد (`PIPELINE_NOT_READY`).
+
+### Retry & Cancel
+
+- `POST /api/batches/:id/retry-failed`: همهٔ Jobهای FAILED + فایل‌های FAILED به صف برمی‌گردند و Batch دوباره فعال می‌شود. Retry روی Batch سالم no-op است.
+- `POST /api/batches/:id/cancel`: فقط Jobهای PENDING را CANCELLED می‌کند؛ دانش نهایی و محتوا دست‌نخورده می‌ماند؛ `refreshBatchState` وضعیت CANCELLED را برنمی‌گرداند.
+- Retryable (429/5xx/شبکه) در Workerها با Backoff؛ Permanent (مدل/پرامپت/کلید/دادهٔ ناسالم) FAILED بدون Loop.
+
+### Progress و Stage واقعی
+
+- `BatchSummary.currentStage` (مشتق از Status) + `BatchProgress` (خروجی ۶ مرحله از DB — «x / y» واقعی، بدون درصد جعلی).
+- UI Batch Detail: مرحلهٔ فعلی، نوارهای پیشرفت هر Stage، بخش «خطاها» (کد + پیام + تلاش) و دکمه‌های Retry/Cancel.
+
+### Master Knowledge Search & Conflict Resolution
+
+- `listDestinationKnowledge` حالا `q` (متن/موجودیت/ویژگی) + فیلتر `knowledgeType` + `status` دارد — جستجوی UI بدون هیچ Gemini Call.
+- `POST /api/conflicts/:id/resolve` فقط اکشن‌های امن: `DISMISS` (و `RESOLVE` با note) — نسخه‌ها و Master هرگز دور زده نمی‌شوند.
+
+### Overview & Usage
+
+- `GET /api/overview`: آمادگی سیستم (Preflight)، تعداد مقصدها / Master Knowledge / تعارض‌های باز / Batchها، Batchهای اخیر با Stage، و Usage همه‌زمان به تفکیک Stage.
+- `GET /api/usage`: جمع همه‌زمان توکن‌ها و Calls به تفکیک Stage (TRANSCRIPTION/KNOWLEDGE/EMBEDDING/CONTENT) — فقط دادهٔ واقعی `api_usage`.
+
+### باگ‌های پیدا‌شده و رفع‌شده
+
+- **Multi-destination Content:** `BatchFinalizationService` فقط Jobهای Processing را Terminal می‌دانست؛ در Batchهای چندمقصدی، بعد از اولین Content، Batch COMPLETED می‌شد و Content بقیهٔ مقصدها هرگز ساخته نمی‌شد. فیکس: `CONTENT_GENERATION` به `PROCESSING_JOB_TYPES` اضافه شد.
+- **Regenerate روی Batch COMPLETED:** Job جدید ساخته می‌شد ولی Worker آن را Claim نمی‌کرد. فیکس: `regenerate` Batch را به `GENERATING_CONTENT` برمی‌گرداند.
+
 ## خارج از محدوده فعلی
 
 عمداً ساخته نشده‌اند: Authentication، Docker، Redis، Microservices، Vector Database خارجی، Pricing/Cost محاسباتی، و بازطراحی کلی. زیرساخت لازم (GeminiGateway، model config، پرامپت‌ها، readiness، Batch/Job، Worker، Transcript، Candidates/Delta/Reconciliation/Batch Delta/Content) آماده است.
