@@ -1,13 +1,25 @@
 import { ArrowRight, MapPin, RefreshCw } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { DestinationDetailResponse, KnowledgeType } from '@freebuff/contracts';
+import type {
+  DestinationDetailResponse,
+  KnowledgeChangeInfo,
+  KnowledgeConflictInfo,
+  KnowledgeType,
+  MasterKnowledgeItem,
+} from '@freebuff/contracts';
 import { ErrorState } from '../components/ErrorState';
 import { LoadingState } from '../components/LoadingState';
 import { PageHeader } from '../components/PageHeader';
 import { SectionCard } from '../components/SectionCard';
 import { StatusBadge, type StatusTone } from '../components/StatusBadge';
-import { fetchDestination } from '../lib/api';
+import { KnowledgeDetailDrawer } from '../features/knowledge/KnowledgeDetailDrawer';
+import {
+  fetchDestination,
+  fetchDestinationChanges,
+  fetchDestinationConflicts,
+  fetchMasterKnowledge,
+} from '../lib/api';
 
 const STATUS_TONE: Record<DestinationDetailResponse['status'], StatusTone> = {
   PROVISIONAL: 'warning',
@@ -49,14 +61,29 @@ export function DestinationDetailPage() {
   const { id } = useParams<{ id: string }>();
   const destinationId = Number(id);
   const [destination, setDestination] = useState<DestinationDetailResponse | null>(null);
+  const [masterItems, setMasterItems] = useState<MasterKnowledgeItem[]>([]);
+  const [masterTotal, setMasterTotal] = useState(0);
+  const [changes, setChanges] = useState<KnowledgeChangeInfo[]>([]);
+  const [conflicts, setConflicts] = useState<KnowledgeConflictInfo[]>([]);
+  const [selectedKnowledgeId, setSelectedKnowledgeId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    fetchDestination(destinationId)
-      .then((result) => {
-        if (!cancelled) setDestination(result);
+    Promise.all([
+      fetchDestination(destinationId),
+      fetchMasterKnowledge(destinationId, 100),
+      fetchDestinationChanges(destinationId),
+      fetchDestinationConflicts(destinationId),
+    ])
+      .then(([dest, master, changeRes, conflictRes]) => {
+        if (cancelled) return;
+        setDestination(dest);
+        setMasterItems(master.items);
+        setMasterTotal(master.total);
+        setChanges(changeRes.changes);
+        setConflicts(conflictRes.conflicts);
       })
       .catch((error: unknown) => {
         if (!cancelled)
@@ -73,8 +100,19 @@ export function DestinationDetailPage() {
   const retry = useCallback(() => {
     setIsLoading(true);
     setLoadError(null);
-    void fetchDestination(destinationId)
-      .then(setDestination)
+    Promise.all([
+      fetchDestination(destinationId),
+      fetchMasterKnowledge(destinationId, 100),
+      fetchDestinationChanges(destinationId),
+      fetchDestinationConflicts(destinationId),
+    ])
+      .then(([dest, master, changeRes, conflictRes]) => {
+        setDestination(dest);
+        setMasterItems(master.items);
+        setMasterTotal(master.total);
+        setChanges(changeRes.changes);
+        setConflicts(conflictRes.conflicts);
+      })
       .catch((error: unknown) => {
         setLoadError(error instanceof Error ? error.message : 'خطا در دریافت مقصد.');
       })
@@ -154,6 +192,134 @@ export function DestinationDetailPage() {
             </div>
           </SectionCard>
         )}
+
+        <SectionCard
+          title="Master Knowledge"
+          description={`${masterTotal} مورد دانش نهایی و معتبر این مقصد — برای مشاهده نسخه‌ها و شواهد کلیک کنید`}
+        >
+          {masterItems.length === 0 ? (
+            <p className="py-6 text-center text-sm text-text-secondary">
+              هنوز دانش نهایی (Reconciled) برای این مقصد وجود ندارد.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-start text-sm">
+                <thead>
+                  <tr className="border-b border-border text-xs text-text-secondary">
+                    <th className="px-3 py-2 text-start font-medium">نوع</th>
+                    <th className="px-3 py-2 text-start font-medium">موجودیت</th>
+                    <th className="px-3 py-2 text-start font-medium">ویژگی</th>
+                    <th className="px-3 py-2 text-start font-medium">مقدار فعلی</th>
+                    <th className="px-3 py-2 text-start font-medium">شواهد</th>
+                    <th className="px-3 py-2 text-start font-medium">اولین دیده</th>
+                    <th className="px-3 py-2 text-start font-medium">آخرین دیده</th>
+                    <th className="px-3 py-2 text-start font-medium">وضعیت</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {masterItems.map((item) => (
+                    <tr
+                      key={item.id}
+                      className="cursor-pointer transition-colors hover:bg-surface-muted/50"
+                      onClick={() => setSelectedKnowledgeId(item.id)}
+                    >
+                      <td className="px-3 py-2.5 text-text-primary">
+                        {KNOWLEDGE_TYPE_LABEL[item.knowledgeType]}
+                      </td>
+                      <td className="px-3 py-2.5 text-text-primary">{item.entityName ?? '—'}</td>
+                      <td className="px-3 py-2.5 text-text-primary">{item.attribute ?? '—'}</td>
+                      <td className="px-3 py-2.5 text-text-primary">
+                        {item.currentValue}
+                        {item.unit && <span className="text-xs text-text-muted"> {item.unit}</span>}
+                      </td>
+                      <td className="px-3 py-2.5 text-text-secondary">{item.evidenceCount}</td>
+                      <td className="px-3 py-2.5 text-xs text-text-secondary">
+                        {item.firstSeenAt ? formatDate(item.firstSeenAt) : '—'}
+                        {item.firstSeenBatchId ? ` (B${item.firstSeenBatchId})` : ''}
+                      </td>
+                      <td className="px-3 py-2.5 text-xs text-text-secondary">
+                        {item.lastSeenAt ? formatDate(item.lastSeenAt) : '—'}
+                        {item.lastSeenBatchId ? ` (B${item.lastSeenBatchId})` : ''}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <StatusBadge
+                          tone={item.status === 'ACTIVE' ? 'success' : item.status === 'PROVISIONAL' ? 'warning' : 'neutral'}
+                          label={item.status}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </SectionCard>
+
+        <SectionCard
+          title="تغییرات اخیر"
+          description="تغییرات Publishable (NEW/UPDATE) این مقصد"
+        >
+          {changes.length === 0 ? (
+            <p className="py-6 text-center text-sm text-text-secondary">تغییری ثبت نشده است.</p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {changes.slice(0, 10).map((change) => (
+                <li key={change.id} className="flex items-center justify-between gap-4 py-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm text-text-primary">{change.canonicalText}</p>
+                    <p className="text-xs text-text-muted">
+                      {change.changeType === 'NEW' ? (
+                        <span className="text-emerald-600">جدید</span>
+                      ) : (
+                        <span className="text-amber-600">
+                          به‌روزرسانی: {change.oldValue ?? '—'} ← {change.newValue ?? '—'}
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded-md border border-border px-2.5 py-1 text-xs text-text-primary hover:bg-surface-muted"
+                    onClick={() => setSelectedKnowledgeId(change.knowledgeId)}
+                  >
+                    مشاهده
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </SectionCard>
+
+        <SectionCard
+          title="تعارضات"
+          description="ادعاهای متناقضی که به‌صورت خودکار جایگزین نشده‌اند"
+        >
+          {conflicts.length === 0 ? (
+            <p className="py-6 text-center text-sm text-text-secondary">تعارضی ثبت نشده است.</p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {conflicts.map((conflict) => (
+                <li key={conflict.id} className="py-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <p className="text-sm text-text-primary" dir="auto">
+                      {conflict.candidateCanonicalText}
+                    </p>
+                    <StatusBadge
+                      tone={conflict.status === 'OPEN' ? 'danger' : conflict.status === 'RESOLVED' ? 'success' : 'neutral'}
+                      label={conflict.status}
+                    />
+                  </div>
+                  <p className="mt-1 text-xs text-text-muted">
+                    {conflict.existingValue !== null && (
+                      <span>ارزش موجود: {conflict.existingValue} · </span>
+                    )}
+                    ارزش ادعا: {conflict.candidateValue ?? '—'} · {formatDate(conflict.createdAt)}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </SectionCard>
 
         <SectionCard
           title="دانش استخراج‌شده"
@@ -236,6 +402,13 @@ export function DestinationDetailPage() {
           )}
         </SectionCard>
       </div>
+
+      {selectedKnowledgeId !== null && (
+        <KnowledgeDetailDrawer
+          knowledgeId={selectedKnowledgeId}
+          onClose={() => setSelectedKnowledgeId(null)}
+        />
+      )}
     </>
   );
 }

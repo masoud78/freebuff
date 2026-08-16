@@ -11,6 +11,7 @@ import { batchService } from '../batches.service.js';
 import { computeRetryDelayMs } from '../transcription/worker.js';
 import { candidatesService } from './candidates.service.js';
 import { knowledgeDeltaService } from './knowledge-delta.service.js';
+import { batchFinalizationService } from './batch-finalization.service.js';
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -54,6 +55,7 @@ export class DeltaWorker {
       // Claims left DECIDED by a crash (no decision row) are recovered.
       await candidatesService.reconcileStaleClaims();
       await knowledgeDeltaService.processTranscript(job, this.gateway);
+      await batchFinalizationService.finalizeIfComplete(job.batchId);
     } catch (error) {
       await this.handleExecutionError(job, error);
     }

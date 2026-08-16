@@ -203,6 +203,15 @@ export class KnowledgeAnalysisService {
       await destinationService.linkTranscript(transcript.id, resolved.id, resolved.confidence, tx);
     }
 
+    const segmentText = new Map(
+      (
+        await tx
+          .select({ id: transcriptSegments.id, text: transcriptSegments.text })
+          .from(transcriptSegments)
+          .where(eq(transcriptSegments.transcriptId, transcript.id))
+      ).map((row) => [row.id, row.text]),
+    );
+
     let createdAny = false;
     for (const candidate of analysis.knowledge) {
       // Low confidence → rejected, never persisted.
@@ -211,6 +220,7 @@ export class KnowledgeAnalysisService {
       const destinationId = candidate.destinationReference
         ? (resolvedDestinations.get(candidate.destinationReference) ?? null)
         : null;
+      const firstSegmentId = candidate.sourceSegmentIds[0] ?? null;
 
       const identityKey = buildKnowledgeIdentityKey({
         destinationId,
@@ -244,6 +254,8 @@ export class KnowledgeAnalysisService {
           identityKey,
           valueHash,
           confidence: candidate.confidence,
+          sourceSegmentId: firstSegmentId,
+          sourceText: firstSegmentId !== null ? (segmentText.get(firstSegmentId) ?? '') : transcript.fullText.slice(0, 500),
         },
         tx,
       );

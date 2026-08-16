@@ -310,15 +310,25 @@ export const knowledgeItems = sqliteTable(
     entityType: text('entity_type'),
     entityName: text('entity_name'),
     attribute: text('attribute'),
-    /** Stable backend-computed identity for future dedup — never from Gemini. */
+    /** Stable backend-computed identity for dedup — never from Gemini. */
     identityKey: text('identity_key').notNull(),
     canonicalText: text('canonical_text').notNull(),
     status: text('status').notNull().default('ACTIVE'),
     firstSeenBatchId: integer('first_seen_batch_id'),
+    firstSeenAt: integer('first_seen_at', { mode: 'timestamp_ms' }),
+    lastSeenBatchId: integer('last_seen_batch_id'),
+    lastSeenAt: integer('last_seen_at', { mode: 'timestamp_ms' }),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
   },
-  (table) => [index('knowledge_items_identity_key_idx').on(table.identityKey)],
+  (table) => [
+    index('knowledge_items_identity_key_idx').on(table.identityKey),
+    index('knowledge_items_destination_idx').on(table.destinationId),
+    // One canonical master identity per destination scope (Phase 10).
+    uniqueIndex('knowledge_items_canonical_unique_idx')
+      .on(table.destinationId, table.identityKey)
+      .where(sql`status IN ('ACTIVE', 'PROVISIONAL')`),
+  ],
 );
 
 export type KnowledgeItemRow = typeof knowledgeItems.$inferSelect;
@@ -344,6 +354,10 @@ export const knowledgeVersions = sqliteTable(
   (table) => [
     index('knowledge_versions_knowledge_id_idx').on(table.knowledgeId),
     index('knowledge_versions_current_idx')
+      .on(table.knowledgeId)
+      .where(sql`is_current = 1`),
+    // Exactly one current version per knowledge item (Phase 10).
+    uniqueIndex('knowledge_versions_one_current_idx')
       .on(table.knowledgeId)
       .where(sql`is_current = 1`),
   ],
@@ -372,7 +386,17 @@ export const knowledgeEvidence = sqliteTable(
     sourceText: text('source_text').notNull(),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   },
-  (table) => [index('knowledge_evidence_knowledge_id_idx').on(table.knowledgeId)],
+  (table) => [
+    index('knowledge_evidence_knowledge_id_idx').on(table.knowledgeId),
+    index('knowledge_evidence_transcript_idx').on(table.transcriptId),
+    // One source may evidence a knowledge version only once (Phase 10 replay safety).
+    uniqueIndex('knowledge_evidence_source_unique_idx').on(
+      table.knowledgeId,
+      table.knowledgeVersionId,
+      table.transcriptId,
+      table.segmentId,
+    ),
+  ],
 );
 
 export type KnowledgeEvidenceRow = typeof knowledgeEvidence.$inferSelect;
@@ -428,6 +452,9 @@ export const knowledgeCandidates = sqliteTable(
     valueHash: text('value_hash').notNull(),
     confidence: integer('confidence').notNull().default(0.5),
     status: text('status').notNull().default('PENDING'),
+    /** Source segment for reconciliation evidence (Phase 10). */
+    sourceSegmentId: integer('source_segment_id'),
+    sourceText: text('source_text'),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
   },
@@ -487,6 +514,8 @@ export const knowledgeDeltaDecisions = sqliteTable(
     /** Short, safe summary — never chain-of-thought. */
     reasoningSummary: text('reasoning_summary'),
     inputSignature: text('input_signature').notNull(),
+    /** Set when Phase 10 reconciliation applied this decision. */
+    reconciledAt: integer('reconciled_at', { mode: 'timestamp_ms' }),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   },
   (table) => [
@@ -516,3 +545,98 @@ export const deltaMetrics = sqliteTable(
 
 export type DeltaMetricRow = typeof deltaMetrics.$inferSelect;
 export type NewDeltaMetricRow = typeof deltaMetrics.$inferInsert;
+
+/**
+ * Master knowledge change — the publishable Batch Delta (NEW/UPDATE only).
+ * CONFIRMATION/CONFLICT/IGNORE never appear here.
+ */
+export const knowledgeChanges = sqliteTable(
+  'knowledge_changes',
+  {
+    id: integer('id').primaryKey(),
+    batchId: integer('batch_id').notNull(),
+    destinationId: integer('destination_id'),
+    knowledgeId: integer('knowledge_id')
+      .notNull()
+      .references(() => knowledgeItems.id),
+    changeType: text('change_type').notNull(), // NEW | UPDATE
+    oldVersionId: integer('old_version_id').references(() => knowledgeVersions.id),
+    newVersionId: integer('new_version_id')
+      .notNull()
+      .references(() => knowledgeVersions.id),
+    sourceDecisionId: integer('source_decision_id')
+      .notNull()
+      .references(() => knowledgeDeltaDecisions.id),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    // Replay safety: one change record per decision.
+    uniqueIndex('knowledge_changes_decision_unique_idx').on(table.sourceDecisionId),
+    index('knowledge_changes_batch_destination_idx').on(table.batchId, table.destinationId),
+    index('knowledge_changes_knowledge_idx').on(table.knowledgeId),
+  ],
+);
+
+export type KnowledgeChangeRow = typeof knowledgeChanges.$inferSelect;
+export type NewKnowledgeChangeRow = typeof knowledgeChanges.$inferInsert;
+
+/** Open conflict registry — CONFLICT decisions never silently overwrite truth. */
+export const knowledgeConflicts = sqliteTable(
+  'knowledge_conflicts',
+  {
+    id: integer('id').primaryKey(),
+    destinationId: integer('destination_id'),
+    knowledgeId: integer('knowledge_id').references(() => knowledgeItems.id),
+    candidateId: integer('candidate_id')
+      .notNull()
+      .references(() => knowledgeCandidates.id),
+    existingVersionId: integer('existing_version_id').references(() => knowledgeVersions.id),
+    status: text('status').notNull().default('OPEN'), // OPEN | RESOLVED | DISMISSED
+    conflictType: text('conflict_type'),
+    /** Groups same-identity conflicts (same destination + identity key). */
+    conflictGroupKey: text('conflict_group_key').notNull(),
+    resolutionNote: text('resolution_note'),
+    resolvedVersionId: integer('resolved_version_id'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    resolvedAt: integer('resolved_at', { mode: 'timestamp_ms' }),
+  },
+  (table) => [
+    uniqueIndex('knowledge_conflicts_candidate_unique_idx').on(table.candidateId),
+    index('knowledge_conflicts_destination_status_idx').on(table.destinationId, table.status),
+    index('knowledge_conflicts_group_idx').on(table.conflictGroupKey),
+  ],
+);
+
+export type KnowledgeConflictRow = typeof knowledgeConflicts.$inferSelect;
+export type NewKnowledgeConflictRow = typeof knowledgeConflicts.$inferInsert;
+
+/**
+ * Per-batch, per-destination summary of reconciliation results. Derived from
+ * canonical data (recomputed), so retries can never double-count.
+ */
+export const batchDestinationSummaries = sqliteTable(
+  'batch_destination_summaries',
+  {
+    id: integer('id').primaryKey(),
+    batchId: integer('batch_id').notNull(),
+    destinationId: integer('destination_id')
+      .notNull()
+      .references(() => destinations.id),
+    newCount: integer('new_count').notNull().default(0),
+    updatedCount: integer('updated_count').notNull().default(0),
+    confirmationCount: integer('confirmation_count').notNull().default(0),
+    conflictCount: integer('conflict_count').notNull().default(0),
+    ignoredCount: integer('ignored_count').notNull().default(0),
+    publishableDeltaCount: integer('publishable_delta_count').notNull().default(0),
+    status: text('status').notNull().default('FINALIZED'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('batch_destination_summaries_unique_idx').on(table.batchId, table.destinationId),
+    index('batch_destination_summaries_batch_idx').on(table.batchId),
+  ],
+);
+
+export type BatchDestinationSummaryRow = typeof batchDestinationSummaries.$inferSelect;
+export type NewBatchDestinationSummaryRow = typeof batchDestinationSummaries.$inferInsert;

@@ -327,6 +327,11 @@ export class KnowledgeDeltaService {
       }
     }
 
+    // Phase 10: every decided candidate gets a persistent reconciliation job.
+    // Idempotent (RECONCILE:{decision_id}) — a replay never duplicates jobs,
+    // and the reconciliation worker's sweep covers crash gaps.
+    await this.ensureReconciliationJobs(transcriptId);
+
     await jobService.markCompleted(job.id);
     await batchService.refreshBatchState(job.batchId);
   }
@@ -519,6 +524,32 @@ export class KnowledgeDeltaService {
         target: [deltaMetrics.batchId, deltaMetrics.metricKey],
         set: { value: sql`${deltaMetrics.value} + 1`, updatedAt: now },
       });
+  }
+
+  /** Create a KNOWLEDGE_RECONCILIATION job per decided candidate. */
+  private async ensureReconciliationJobs(transcriptId: number): Promise<number> {
+    const db = getDatabase();
+    const rows = await db
+      .select({ decisionId: knowledgeDeltaDecisions.id, batchId: knowledgeCandidates.batchId })
+      .from(knowledgeDeltaDecisions)
+      .innerJoin(knowledgeCandidates, eq(knowledgeCandidates.id, knowledgeDeltaDecisions.candidateId))
+      .where(
+        and(
+          eq(knowledgeCandidates.transcriptId, transcriptId),
+          sql`${knowledgeDeltaDecisions.reconciledAt} IS NULL`,
+        ),
+      );
+    let created = 0;
+    for (const row of rows) {
+      const { created: ok } = await jobService.createJob({
+        batchId: row.batchId,
+        jobType: 'KNOWLEDGE_RECONCILIATION',
+        entityId: row.decisionId,
+        idempotencyKey: `RECONCILE:${row.decisionId}`,
+      });
+      if (ok) created += 1;
+    }
+    return created;
   }
 
   /** Metric counter for a batch+key (UI/debug). */

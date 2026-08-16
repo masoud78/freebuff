@@ -22,6 +22,9 @@ export interface CreateCandidateInput {
   identityKey: string;
   valueHash: string;
   confidence: number;
+  /** Source segment for reconciliation evidence (Phase 10). */
+  sourceSegmentId: number | null;
+  sourceText: string;
 }
 
 /**
@@ -53,6 +56,8 @@ export class CandidatesService {
         identityKey: input.identityKey,
         valueHash: input.valueHash,
         confidence: input.confidence,
+        sourceSegmentId: input.sourceSegmentId,
+        sourceText: input.sourceText,
         status: 'PENDING',
         createdAt: now,
         updatedAt: now,

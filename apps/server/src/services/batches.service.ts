@@ -74,6 +74,12 @@ async function computeStats(batchId: number): Promise<BatchStats> {
   const deltaDecided = await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_DELTA', 'COMPLETED');
   const deltaFailed = await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_DELTA', 'FAILED');
 
+  // Reconciliation phase: KNOWLEDGE_RECONCILIATION jobs (Phase 10).
+  const reconcilePending = await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_RECONCILIATION', 'PENDING');
+  const reconcileRunning = await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_RECONCILIATION', 'RUNNING');
+  const reconcileCompleted = await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_RECONCILIATION', 'COMPLETED');
+  const reconcileFailed = await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_RECONCILIATION', 'FAILED');
+
   return {
     totalAudio: Number(totalAudio?.count ?? 0),
     newAudio: (await countBy('QUEUED')) + (await countBy('REGISTERED')) + (await countBy('TRANSCRIBING')) + (await countBy('TRANSCRIBED')),
@@ -94,6 +100,10 @@ async function computeStats(batchId: number): Promise<BatchStats> {
     deltaComparing,
     deltaDecided,
     deltaFailed,
+    reconcilePending,
+    reconcileRunning,
+    reconcileCompleted,
+    reconcileFailed,
   };
 }
 
@@ -143,6 +153,10 @@ export class BatchService {
           deltaComparing: 0,
           deltaDecided: 0,
           deltaFailed: 0,
+          reconcilePending: 0,
+          reconcileRunning: 0,
+          reconcileCompleted: 0,
+          reconcileFailed: 0,
         },
       );
     } catch (error) {
@@ -338,6 +352,13 @@ export class BatchService {
       failed: await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_DELTA', 'FAILED'),
     };
     const deltaTotal = delta.pending + delta.running + delta.completed + delta.failed;
+    const reconcile = {
+      pending: await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_RECONCILIATION', 'PENDING'),
+      running: await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_RECONCILIATION', 'RUNNING'),
+      completed: await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_RECONCILIATION', 'COMPLETED'),
+      failed: await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_RECONCILIATION', 'FAILED'),
+    };
+    const reconcileTotal = reconcile.pending + reconcile.running + reconcile.completed + reconcile.failed;
 
     let status: BatchStatus;
     if (stats.newAudio === 0) {
@@ -346,17 +367,29 @@ export class BatchService {
       status = stats.failedItems > 0 ? 'FAILED' : 'COMPLETED';
     } else if (counts.PENDING > 0 || counts.RUNNING > 0) {
       // In progress — distinguish the active phase. Delta processing is its
-      // own phase so the UI can show "Comparing" while delta jobs run.
+      // own phase so the UI can show "Comparing" while delta jobs run;
+      // reconciliation is its own phase on top.
       if (delta.pending + delta.running > 0) {
         status = 'DELTA_PROCESSING';
+      } else if (reconcile.pending + reconcile.running > 0) {
+        status = 'RECONCILING';
       } else if (knowledge.pending + knowledge.running > 0) {
         status = 'ANALYZING';
       } else {
         status = 'TRANSCRIBING';
       }
+    } else if (reconcileTotal > 0) {
+      // Reconciliation phase is terminal. Any failed job makes the batch
+      // partial; a clean run is KNOWLEDGE_READY (§42).
+      if (reconcile.failed > 0) {
+        status = reconcile.completed > 0 || delta.completed > 0 || knowledge.completed > 0 ? 'PARTIAL_FAILED' : 'FAILED';
+      } else if (stats.failedItems > 0 || counts.FAILED > 0) {
+        status = 'PARTIAL_FAILED';
+      } else {
+        status = 'KNOWLEDGE_READY';
+      }
     } else if (deltaTotal > 0) {
-      // Delta phase is terminal. Any failed delta job makes the batch partial;
-      // a clean run is ANALYSIS_COMPLETED.
+      // Delta phase is terminal with no reconciliation jobs (no decisions).
       if (delta.failed > 0) {
         status = delta.completed > 0 || knowledge.completed > 0 ? 'PARTIAL_FAILED' : 'FAILED';
       } else if (stats.failedItems > 0 || counts.FAILED > 0) {
@@ -381,7 +414,7 @@ export class BatchService {
       status = 'COMPLETED';
     }
 
-    const terminal = ['COMPLETED', 'ANALYSIS_COMPLETED', 'PARTIAL_FAILED', 'FAILED', 'CANCELLED'].includes(status);
+    const terminal = ['COMPLETED', 'ANALYSIS_COMPLETED', 'KNOWLEDGE_READY', 'PARTIAL_FAILED', 'FAILED', 'CANCELLED'].includes(status);
     await db
       .update(batches)
       .set({

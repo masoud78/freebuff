@@ -87,6 +87,10 @@ test('create batch', async () => {
     deltaComparing: 0,
     deltaDecided: 0,
     deltaFailed: 0,
+    reconcilePending: 0,
+    reconcileRunning: 0,
+    reconcileCompleted: 0,
+    reconcileFailed: 0,
   });
 });
 

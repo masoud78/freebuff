@@ -3,6 +3,7 @@ import { initDatabase } from './core/database/index.js';
 import { jobService } from './services/jobs.service.js';
 import { deltaWorker } from './services/knowledge/delta.worker.js';
 import { knowledgeWorker } from './services/knowledge/knowledge.worker.js';
+import { reconciliationWorker } from './services/knowledge/reconciliation.worker.js';
 import { promptsService } from './services/prompts.service.js';
 import { settingsService } from './services/settings.service.js';
 import { transcriptionWorker } from './services/transcription/worker.js';
@@ -30,6 +31,7 @@ try {
   transcriptionWorker.start();
   knowledgeWorker.start();
   deltaWorker.start();
+  reconciliationWorker.start();
 
   // Graceful shutdown: stop claiming new jobs and close the HTTP server;
   // in-flight Gemini requests get a chance to finish.
@@ -37,6 +39,7 @@ try {
     transcriptionWorker.stop();
     knowledgeWorker.stop();
     deltaWorker.stop();
+    reconciliationWorker.stop();
     void app.close().finally(() => process.exit(0));
   };
   process.on('SIGINT', shutdown);

@@ -3,17 +3,23 @@ import type {
   ApiErrorCode,
   ApiErrorResponse,
   AppSettings,
+  BatchDeltaResponse,
   BatchDetailResponse,
+  BatchDestinationSummaryInfo,
   BatchListResponse,
   BatchSummary,
   CandidateRetrievalDebugResponse,
+  DestinationConflictsResponse,
   DestinationDetailResponse,
   DestinationListResponse,
+  DestinationMasterKnowledgeResponse,
   GeminiCredentialStatusResponse,
   GeminiModelsResponse,
   GeminiTestConnectionResponse,
   HealthResponse,
   KnowledgeDecisionsResponse,
+  KnowledgeDetailResponse,
+  KnowledgeChangeInfo,
   ModelConfigResponse,
   ModelConfigsResponse,
   PromptTemplatesResponse,
@@ -253,4 +259,65 @@ export function fetchCandidateRetrievalDebug(
 /** Token/API savings metrics for a batch. */
 export function fetchDeltaMetrics(batchId: number): Promise<Record<string, number>> {
   return request<Record<string, number>>(`${API_BASE_URL}/api/batches/${batchId}/delta-metrics`);
+}
+
+// ---------------------------------------------------------------------------
+// Master knowledge, conflicts, changes & batch delta (Phase 10)
+// ---------------------------------------------------------------------------
+
+/** Bounded master knowledge list of a destination. */
+export function fetchMasterKnowledge(
+  destinationId: number,
+  limit = 50,
+  offset = 0,
+): Promise<DestinationMasterKnowledgeResponse> {
+  return request<DestinationMasterKnowledgeResponse>(
+    `${API_BASE_URL}/api/destinations/${destinationId}/master-knowledge?limit=${limit}&offset=${offset}`,
+  );
+}
+
+/** Full knowledge detail: current + versions + evidence + changes. */
+export function fetchKnowledgeDetail(knowledgeId: number): Promise<KnowledgeDetailResponse> {
+  return request<KnowledgeDetailResponse>(`${API_BASE_URL}/api/knowledge/${knowledgeId}`);
+}
+
+/** Open + resolved conflicts of a destination. */
+export function fetchDestinationConflicts(
+  destinationId: number,
+): Promise<DestinationConflictsResponse> {
+  return request<DestinationConflictsResponse>(
+    `${API_BASE_URL}/api/destinations/${destinationId}/conflicts`,
+  );
+}
+
+/** Publishable change records (NEW/UPDATE) of a destination. */
+export function fetchDestinationChanges(destinationId: number): Promise<{
+  destinationId: number;
+  changes: KnowledgeChangeInfo[];
+}> {
+  return request<{ destinationId: number; changes: KnowledgeChangeInfo[] }>(
+    `${API_BASE_URL}/api/destinations/${destinationId}/changes`,
+  );
+}
+
+/** Publishable batch delta (NEW/UPDATE per destination — Phase 11 input). */
+export function fetchBatchDelta(batchId: number): Promise<BatchDeltaResponse> {
+  return request<BatchDeltaResponse>(`${API_BASE_URL}/api/batches/${batchId}/delta`);
+}
+
+/** Per-destination summaries of a batch. */
+export function fetchBatchDestinationSummaries(
+  batchId: number,
+): Promise<{ batchId: number; summaries: BatchDestinationSummaryInfo[] }> {
+  return request<{ batchId: number; summaries: BatchDestinationSummaryInfo[] }>(
+    `${API_BASE_URL}/api/batches/${batchId}/destination-summaries`,
+  );
+}
+
+/** Rebuild summaries + advance batch state (idempotent, no Gemini). */
+export function finalizeBatch(batchId: number): Promise<{ batchId: number; finalized: boolean }> {
+  return request<{ batchId: number; finalized: boolean }>(
+    `${API_BASE_URL}/api/batches/${batchId}/finalize`,
+    { method: 'POST' },
+  );
 }

@@ -106,6 +106,17 @@ export const deltaErrorCodes = [
 
 export type DeltaErrorCode = (typeof deltaErrorCodes)[number];
 
+export const reconciliationErrorCodes = [
+  'RECONCILIATION_TARGET_NOT_FOUND',
+  'RECONCILIATION_VERSION_CONFLICT',
+  'RECONCILIATION_DUPLICATE',
+  'KNOWLEDGE_TRANSACTION_FAILED',
+  'CONFLICT_CREATE_FAILED',
+  'BATCH_DELTA_FINALIZATION_FAILED',
+] as const;
+
+export type ReconciliationErrorCode = (typeof reconciliationErrorCodes)[number];
+
 export const apiErrorCodes = [
   ...settingsErrorCodes,
   ...geminiErrorCodes,
@@ -116,6 +127,7 @@ export const apiErrorCodes = [
   ...transcriptionErrorCodes,
   ...knowledgeErrorCodes,
   ...deltaErrorCodes,
+  ...reconciliationErrorCodes,
 ] as const;
 
 export type ApiErrorCode = (typeof apiErrorCodes)[number];
@@ -283,7 +295,9 @@ export const batchStatuses = [
   'TRANSCRIBING',
   'ANALYZING',
   'DELTA_PROCESSING',
+  'RECONCILING',
   'ANALYSIS_COMPLETED',
+  'KNOWLEDGE_READY',
   'COMPLETED',
   'PARTIAL_FAILED',
   'FAILED',
@@ -307,7 +321,7 @@ export type AudioStatus = (typeof audioStatuses)[number];
 export const jobStatuses = ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED'] as const;
 export type JobStatus = (typeof jobStatuses)[number];
 
-export const jobTypes = ['TRANSCRIPTION', 'KNOWLEDGE_ANALYSIS', 'KNOWLEDGE_DELTA'] as const;
+export const jobTypes = ['TRANSCRIPTION', 'KNOWLEDGE_ANALYSIS', 'KNOWLEDGE_DELTA', 'KNOWLEDGE_RECONCILIATION'] as const;
 export type JobType = (typeof jobTypes)[number];
 
 /** Extensions accepted for audio ingestion. */
@@ -352,6 +366,14 @@ export interface BatchStats {
   deltaDecided: number;
   /** KNOWLEDGE_DELTA jobs failed. */
   deltaFailed: number;
+  /** KNOWLEDGE_RECONCILIATION jobs waiting to run. */
+  reconcilePending: number;
+  /** KNOWLEDGE_RECONCILIATION jobs currently applying. */
+  reconcileRunning: number;
+  /** KNOWLEDGE_RECONCILIATION jobs completed. */
+  reconcileCompleted: number;
+  /** KNOWLEDGE_RECONCILIATION jobs failed. */
+  reconcileFailed: number;
 }
 
 export interface BatchSummary {
@@ -624,6 +646,154 @@ export interface CandidateRetrievalDebugResponse {
   destinationId: number | null;
   destinationName: string | null;
   matches: CandidateRetrievalMatch[];
+}
+
+// ---------------------------------------------------------------------------
+// Master knowledge, conflicts, changes & batch delta (Phase 10)
+// ---------------------------------------------------------------------------
+
+export const conflictStatuses = ['OPEN', 'RESOLVED', 'DISMISSED'] as const;
+export type ConflictStatus = (typeof conflictStatuses)[number];
+
+export const knowledgeChangeTypes = ['NEW', 'UPDATE'] as const;
+export type KnowledgeChangeType = (typeof knowledgeChangeTypes)[number];
+
+/** One master knowledge item with its current value (destination-scoped). */
+export interface MasterKnowledgeItem {
+  id: number;
+  destinationId: number | null;
+  knowledgeType: KnowledgeType;
+  category: string | null;
+  entityType: string | null;
+  entityName: string | null;
+  attribute: string | null;
+  canonicalText: string;
+  currentValue: string | null;
+  unit: string | null;
+  versionNumber: number;
+  status: KnowledgeStatus;
+  evidenceCount: number;
+  firstSeenBatchId: number | null;
+  firstSeenAt: string | null;
+  lastSeenBatchId: number | null;
+  lastSeenAt: string | null;
+}
+
+export interface KnowledgeVersionInfo {
+  id: number;
+  versionNumber: number;
+  valueText: string | null;
+  unit: string | null;
+  qualifiersJson: string | null;
+  canonicalText: string;
+  isCurrent: boolean;
+  createdAt: string;
+  evidenceCount: number;
+}
+
+export interface KnowledgeEvidenceInfo {
+  id: number;
+  knowledgeId: number;
+  knowledgeVersionId: number;
+  versionNumber: number;
+  batchId: number | null;
+  audioId: number | null;
+  transcriptId: number;
+  audioName: string | null;
+  segmentId: number | null;
+  sourceText: string;
+  createdAt: string;
+}
+
+export interface KnowledgeChangeInfo {
+  id: number;
+  batchId: number;
+  destinationId: number | null;
+  knowledgeId: number;
+  changeType: KnowledgeChangeType;
+  oldVersionId: number | null;
+  newVersionId: number;
+  oldValue: string | null;
+  newValue: string | null;
+  canonicalText: string;
+  createdAt: string;
+}
+
+export interface KnowledgeConflictInfo {
+  id: number;
+  destinationId: number | null;
+  destinationName: string | null;
+  knowledgeId: number | null;
+  candidateId: number;
+  existingVersionId: number | null;
+  existingValue: string | null;
+  candidateCanonicalText: string;
+  candidateValue: string | null;
+  status: ConflictStatus;
+  conflictType: string | null;
+  conflictGroupKey: string;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+export interface KnowledgeDetailResponse {
+  item: MasterKnowledgeItem;
+  versions: KnowledgeVersionInfo[];
+  evidence: KnowledgeEvidenceInfo[];
+  changes: KnowledgeChangeInfo[];
+}
+
+export interface DestinationMasterKnowledgeResponse {
+  destinationId: number;
+  items: MasterKnowledgeItem[];
+  total: number;
+}
+
+export interface DestinationConflictsResponse {
+  destinationId: number;
+  conflicts: KnowledgeConflictInfo[];
+}
+
+export interface DestinationChangesResponse {
+  destinationId: number;
+  changes: KnowledgeChangeInfo[];
+}
+
+export interface BatchDestinationSummaryInfo {
+  batchId: number;
+  destinationId: number;
+  destinationName: string;
+  newCount: number;
+  updatedCount: number;
+  confirmationCount: number;
+  conflictCount: number;
+  ignoredCount: number;
+  publishableDeltaCount: number;
+  status: string;
+}
+
+export interface BatchDeltaItem {
+  changeId: number;
+  changeType: KnowledgeChangeType;
+  knowledgeId: number;
+  versionId: number;
+  canonicalText: string;
+  currentValue: string | null;
+  unit: string | null;
+  entityName: string | null;
+  attribute: string | null;
+  knowledgeType: KnowledgeType;
+}
+
+export interface BatchDestinationDelta {
+  destinationId: number | null;
+  destinationName: string | null;
+  items: BatchDeltaItem[];
+}
+
+export interface BatchDeltaResponse {
+  batchId: number;
+  destinations: BatchDestinationDelta[];
 }
 
 export interface TranscriptKnowledgeInfo {

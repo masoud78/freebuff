@@ -75,6 +75,28 @@ Transcript → Knowledge Extraction → Candidates → Exact Gate → Embedding+
 - **کارایی:** Idempotency با `input_signature` (Candidate + مدل/پرامپت) → `delta_ai_call_skipped_count`؛ Usage واقعی با stageهای `KNOWLEDGE` و `EMBEDDING` در `api_usage`؛ Retry با Backoff برای 429/5xx/شبکه.
 - **UI:** صفحهٔ Batch وضعیت Delta (Knowledge extracted / Delta pending / Comparing / Delta decided / Failed) و بخش «Knowledge Decisions» با بج تصمیم، دانش تطبیق‌شده، اطمینان و Retrieval قابل Debug را نشان می‌دهد.
 
+## Master Reconciliation & Batch Delta (Phase 10)
+
+فاز ۱۰ تصمیم‌های Delta را به‌صورت Transactional و Versioned روی Master Knowledge اعمال می‌کند — کاملاً Deterministic و بدون هیچ Gemini Call جدید:
+
+```text
+Delta Decision → Reconciliation (Transactional) → Destination Master Knowledge + Batch Knowledge Delta
+```
+
+چهار مفهوم کلیدی که باید از هم جدا نگه داشته شوند:
+
+| مفهوم | جدول | نقش |
+|---|---|---|
+| **Knowledge Candidate** | `knowledge_candidates` | خروجی موقت استخراج — Staging، هرگز Master محسوب نمی‌شود |
+| **Delta Decision** | `knowledge_delta_decisions` | تصمیم مقایسه (NEW/CONFIRMATION/UPDATE/CONFLICT/IGNORE) |
+| **Master Knowledge** | `knowledge_items` + `knowledge_versions` + `knowledge_evidence` | دانش واقعی و دائمی هر Destination (Source of Truth) |
+| **Batch Knowledge Delta** | `knowledge_changes` + `batch_destination_summaries` | فقط NEW/UPDATE معتبر و Publishable برای هر Batch+Destination |
+
+- **Reconciliation (`KnowledgeReconciliationService`):** هر تصمیم یک Job پایدار `KNOWLEDGE_RECONCILIATION` می‌گیرد (Idempotency Key `RECONCILE:{decision_id}`). هر اعمال داخل Transaction: `NEW` → Item + V1 + Evidence + Change؛ `CONFIRMATION` → فقط Evidence + `last_seen` (هرگز در Delta)؛ `UPDATE` → نسخهٔ قبلی بایگانی (`is_current=false`) و نسخهٔ جدید با `version_number+1`؛ `CONFLICT` → ثبت در `knowledge_conflicts` (OPEN) بدون تغییر حقیقت فعلی؛ `IGNORE` → هیچ Mutation.
+- **Idempotency و Race Safety:** Replay هر Decision هیچ‌چیز تکراری نمی‌سازد — constraintهای یکتا (یک Canonical به ازای `(destination_id, identity_key)`، یک Current Version به ازای هر Item، یک Evidence به ازای هر Source، یک Change به ازای هر Decision، یک Conflict به ازای هر Candidate) + guard داخل ترنزکشن. NEW رقابتی برای Identity یکسان به `CONFIRMATION`/`CONFLICT` امن Resolve می‌شود (Reason ثبت می‌شود).
+- **Batch Delta (`BatchDeltaService` + `BatchFinalizationService`):** فقط Master NEW/UPDATE با `status=ACTIVE` Publishable هستند (PROVISIONAL حذف، §45). Summaryها (`batch_destination_summaries`) از دادهٔ Canonical Recompute می‌شوند (Retry-safe؛ Rebuild خروجی یکسان می‌دهد). وقتی همهٔ Jobهای Batch (Transcription/Knowledge/Delta/Reconciliation) Terminal شوند، Summary بازسازی و Batch به `KNOWLEDGE_READY` (یا `PARTIAL_FAILED`) می‌رود.
+- **UI:** صفحهٔ Destination اکنون Master Knowledge واقعی (جدول Bounded با Status/First/Last Seen)، Recent Changes و Conflicts را با Knowledge Detail Drawer (نسخه‌ها + شواهد + تغییرات) نشان می‌دهد. صفحهٔ Batch ردیف Reconciliation و بخش «Batch Knowledge Delta» (خلاصهٔ هر Destination + لیست دقیق NEW/UPDATE) را دارد.
+
 ## خارج از محدوده فعلی
 
-عمداً ساخته نشده‌اند: Authentication، Docker، Redis، Microservices، Vector Database خارجی، Master Reconciliation نهایی (فاز ۱۰) و Content Generation (فاز ۱۱+). زیرساخت لازم (GeminiGateway، model config، پرامپت‌ها، readiness، Batch/Job، Worker، Transcript، Candidates/Delta) آماده است.
+عمداً ساخته نشده‌اند: Authentication، Docker، Redis، Microservices، Vector Database خارجی، Content Generation (فاز ۱۱+). زیرساخت لازم (GeminiGateway، model config، پرامپت‌ها، readiness، Batch/Job، Worker، Transcript، Candidates/Delta/Reconciliation/Batch Delta) آماده است.
