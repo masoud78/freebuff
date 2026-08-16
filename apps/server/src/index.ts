@@ -1,6 +1,7 @@
 import { buildApp } from './app.js';
 import { initDatabase } from './core/database/index.js';
 import { jobService } from './services/jobs.service.js';
+import { deltaWorker } from './services/knowledge/delta.worker.js';
 import { knowledgeWorker } from './services/knowledge/knowledge.worker.js';
 import { promptsService } from './services/prompts.service.js';
 import { settingsService } from './services/settings.service.js';
@@ -28,12 +29,14 @@ try {
   // begins when the user starts a batch (or resumes after a restart).
   transcriptionWorker.start();
   knowledgeWorker.start();
+  deltaWorker.start();
 
   // Graceful shutdown: stop claiming new jobs and close the HTTP server;
   // in-flight Gemini requests get a chance to finish.
   const shutdown = (): void => {
     transcriptionWorker.stop();
     knowledgeWorker.stop();
+    deltaWorker.stop();
     void app.close().finally(() => process.exit(0));
   };
   process.on('SIGINT', shutdown);

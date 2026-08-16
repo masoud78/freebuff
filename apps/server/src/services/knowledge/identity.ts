@@ -32,3 +32,29 @@ export function buildKnowledgeIdentityKey(parts: KnowledgeIdentityParts): string
   ].join('|');
   return createHash('sha256').update(payload).digest('hex');
 }
+
+export interface KnowledgeValueParts {
+  valueText: string | null;
+  unit: string | null;
+  qualifiers: string[];
+  valueJson?: unknown;
+}
+
+/**
+ * Deterministic hash of a knowledge value. Exact-gate comparisons compare
+ * identity + this hash: same identity AND same value → CONFIRMATION without
+ * any Gemini call. `valueJson` (when present) is canonicalized by key order
+ * so equivalent objects hash identically.
+ */
+export function buildKnowledgeValueHash(parts: KnowledgeValueParts): string {
+  const json = parts.valueJson !== undefined && parts.valueJson !== null
+    ? JSON.stringify(parts.valueJson, Object.keys(parts.valueJson as Record<string, unknown>).sort())
+    : '';
+  const payload = [
+    normalizePart(parts.valueText),
+    normalizePart(parts.unit),
+    ...(parts.qualifiers ?? []).map(normalizePart),
+    json,
+  ].join('|');
+  return createHash('sha256').update(payload).digest('hex');
+}

@@ -15,6 +15,7 @@ const STATUS_TONE: Record<BatchStatus, StatusTone> = {
   PROCESSING: 'warning',
   TRANSCRIBING: 'warning',
   ANALYZING: 'warning',
+  DELTA_PROCESSING: 'warning',
   ANALYSIS_COMPLETED: 'success',
   COMPLETED: 'success',
   PARTIAL_FAILED: 'warning',

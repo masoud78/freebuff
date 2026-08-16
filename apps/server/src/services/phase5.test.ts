@@ -67,6 +67,14 @@ class MockGateway implements GeminiGatewayLike {
   async analyzeKnowledge(): Promise<never> {
     throw new Error('not used in this test suite');
   }
+
+  async createEmbedding(): Promise<never> {
+    throw new Error('not used in this test suite');
+  }
+
+  async classifyDelta(): Promise<never> {
+    throw new Error('not used in this test suite');
+  }
 }
 
 function isDomainError(error: unknown, code: string): boolean {

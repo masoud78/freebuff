@@ -9,6 +9,7 @@ import { promptRoutes } from './routes/prompts.js';
 import { readinessRoutes } from './routes/readiness.js';
 import { batchRoutes } from './routes/batches.js';
 import { destinationRoutes } from './routes/destinations.js';
+import { knowledgeRoutes } from './routes/knowledge.js';
 
 export interface BuildAppOptions {
   /** Pino options passed to Fastify's built-in logger (which is pino). */
@@ -26,5 +27,6 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.register(readinessRoutes);
   app.register(batchRoutes);
   app.register(destinationRoutes);
+  app.register(knowledgeRoutes);
   return app;
 }

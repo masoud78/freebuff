@@ -394,3 +394,125 @@ export const knowledgeAnalysisRuns = sqliteTable('knowledge_analysis_runs', {
 
 export type KnowledgeAnalysisRunRow = typeof knowledgeAnalysisRuns.$inferSelect;
 export type NewKnowledgeAnalysisRunRow = typeof knowledgeAnalysisRuns.$inferInsert;
+
+/**
+ * One knowledge candidate extracted from a transcript. Candidates are the
+ * unit of delta comparison (Phase 9): Gemini output never mutates master
+ * knowledge directly — it always produces candidates first.
+ */
+export const knowledgeCandidates = sqliteTable(
+  'knowledge_candidates',
+  {
+    id: integer('id').primaryKey(),
+    analysisRunId: integer('analysis_run_id')
+      .notNull()
+      .references(() => knowledgeAnalysisRuns.id),
+    batchId: integer('batch_id').notNull(),
+    transcriptId: integer('transcript_id')
+      .notNull()
+      .references(() => transcripts.id),
+    destinationId: integer('destination_id').references(() => destinations.id),
+    knowledgeType: text('knowledge_type').notNull(),
+    category: text('category'),
+    entityType: text('entity_type'),
+    entityName: text('entity_name'),
+    attribute: text('attribute'),
+    valueText: text('value_text'),
+    valueJson: text('value_json'),
+    unit: text('unit'),
+    qualifiersJson: text('qualifiers_json'),
+    canonicalText: text('canonical_text').notNull(),
+    /** Stable backend-computed identity (same builder as knowledge_items). */
+    identityKey: text('identity_key').notNull(),
+    /** Hash of value parts — exact-gate comparisons use identity+value. */
+    valueHash: text('value_hash').notNull(),
+    confidence: integer('confidence').notNull().default(0.5),
+    status: text('status').notNull().default('PENDING'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    index('knowledge_candidates_destination_identity_idx').on(table.destinationId, table.identityKey),
+    index('knowledge_candidates_status_idx').on(table.status),
+    index('knowledge_candidates_transcript_idx').on(table.transcriptId),
+    index('knowledge_candidates_batch_idx').on(table.batchId),
+  ],
+);
+
+export type KnowledgeCandidateRow = typeof knowledgeCandidates.$inferSelect;
+export type NewKnowledgeCandidateRow = typeof knowledgeCandidates.$inferInsert;
+
+/**
+ * Cached embedding vectors (JSON array in `embedding`). One row per
+ * (model_id, source_hash) — re-embedding identical text is forbidden.
+ */
+export const knowledgeEmbeddings = sqliteTable(
+  'knowledge_embeddings',
+  {
+    id: integer('id').primaryKey(),
+    knowledgeId: integer('knowledge_id'),
+    knowledgeVersionId: integer('knowledge_version_id'),
+    candidateId: integer('candidate_id'),
+    modelId: text('model_id').notNull(),
+    sourceHash: text('source_hash').notNull(),
+    dimensions: integer('dimensions').notNull(),
+    embedding: text('embedding').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('knowledge_embeddings_model_source_unique_idx').on(table.modelId, table.sourceHash),
+    index('knowledge_embeddings_knowledge_id_idx').on(table.knowledgeId),
+  ],
+);
+
+export type KnowledgeEmbeddingRow = typeof knowledgeEmbeddings.$inferSelect;
+export type NewKnowledgeEmbeddingRow = typeof knowledgeEmbeddings.$inferInsert;
+
+/** One persisted delta decision for a knowledge candidate. */
+export const knowledgeDeltaDecisions = sqliteTable(
+  'knowledge_delta_decisions',
+  {
+    id: integer('id').primaryKey(),
+    candidateId: integer('candidate_id')
+      .notNull()
+      .references(() => knowledgeCandidates.id),
+    destinationId: integer('destination_id'),
+    decision: text('decision').notNull(),
+    matchedKnowledgeId: integer('matched_knowledge_id'),
+    matchedVersionId: integer('matched_version_id'),
+    /** Candidate in the same batch that this decision aligns with. */
+    matchedCandidateId: integer('matched_candidate_id'),
+    reasonCode: text('reason_code'),
+    confidence: integer('confidence').notNull().default(0.5),
+    /** Short, safe summary — never chain-of-thought. */
+    reasoningSummary: text('reasoning_summary'),
+    inputSignature: text('input_signature').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('knowledge_delta_decisions_candidate_unique_idx').on(table.candidateId),
+    index('knowledge_delta_decisions_destination_idx').on(table.destinationId),
+  ],
+);
+
+export type KnowledgeDeltaDecisionRow = typeof knowledgeDeltaDecisions.$inferSelect;
+export type NewKnowledgeDeltaDecisionRow = typeof knowledgeDeltaDecisions.$inferInsert;
+
+/**
+ * Lightweight per-batch counters for token/API savings (exact confirmations,
+ * embedding cache hits, skipped AI calls). Foundation for the Phase 11 UI.
+ */
+export const deltaMetrics = sqliteTable(
+  'delta_metrics',
+  {
+    id: integer('id').primaryKey(),
+    batchId: integer('batch_id'),
+    metricKey: text('metric_key').notNull(),
+    value: integer('value').notNull().default(0),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [uniqueIndex('delta_metrics_batch_key_unique_idx').on(table.batchId, table.metricKey)],
+);
+
+export type DeltaMetricRow = typeof deltaMetrics.$inferSelect;
+export type NewDeltaMetricRow = typeof deltaMetrics.$inferInsert;

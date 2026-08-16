@@ -6,12 +6,14 @@ import type {
   BatchDetailResponse,
   BatchListResponse,
   BatchSummary,
+  CandidateRetrievalDebugResponse,
   DestinationDetailResponse,
   DestinationListResponse,
   GeminiCredentialStatusResponse,
   GeminiModelsResponse,
   GeminiTestConnectionResponse,
   HealthResponse,
+  KnowledgeDecisionsResponse,
   ModelConfigResponse,
   ModelConfigsResponse,
   PromptTemplatesResponse,
@@ -226,4 +228,29 @@ export function fetchTranscriptKnowledge(
   return request<TranscriptKnowledgeInfo>(
     `${API_BASE_URL}/api/batches/${batchId}/audio/${audioId}/knowledge`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge delta (Phase 9)
+// ---------------------------------------------------------------------------
+
+/** Candidates + delta decisions of a batch. */
+export function fetchKnowledgeDecisions(batchId: number): Promise<KnowledgeDecisionsResponse> {
+  return request<KnowledgeDecisionsResponse>(
+    `${API_BASE_URL}/api/batches/${batchId}/knowledge-decisions`,
+  );
+}
+
+/** Debuggable retrieval hits for one candidate (expandable in the UI). */
+export function fetchCandidateRetrievalDebug(
+  candidateId: number,
+): Promise<CandidateRetrievalDebugResponse> {
+  return request<CandidateRetrievalDebugResponse>(
+    `${API_BASE_URL}/api/knowledge-candidates/${candidateId}/retrieval`,
+  );
+}
+
+/** Token/API savings metrics for a batch. */
+export function fetchDeltaMetrics(batchId: number): Promise<Record<string, number>> {
+  return request<Record<string, number>>(`${API_BASE_URL}/api/batches/${batchId}/delta-metrics`);
 }

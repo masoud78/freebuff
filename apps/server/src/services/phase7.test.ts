@@ -83,6 +83,30 @@ class MockGateway implements GeminiGatewayLike {
       durationMs: 21,
     };
   }
+
+  async createEmbedding() {
+    this.calls += 1;
+    if (this.behavior === 'rate-limit') {
+      throw new GeminiGatewayError('GEMINI_RATE_LIMIT', 'محدودیت نرخ');
+    }
+    return {
+      embedding: [0.1, 0.2, 0.3],
+      usage: { inputTokens: 1, outputTokens: 0, cachedTokens: 0, totalTokens: 1 },
+      durationMs: 5,
+    };
+  }
+
+  async classifyDelta() {
+    this.calls += 1;
+    if (this.behavior === 'rate-limit') {
+      throw new GeminiGatewayError('GEMINI_RATE_LIMIT', 'محدودیت نرخ');
+    }
+    return {
+      classification: { decision: 'NEW' as const, matchedKnowledgeId: 0, confidence: 0.8, reasonCode: 'NEW_FACT' },
+      usage: { inputTokens: 2, outputTokens: 2, cachedTokens: 0, totalTokens: 4 },
+      durationMs: 9,
+    };
+  }
 }
 
 let dir: string;

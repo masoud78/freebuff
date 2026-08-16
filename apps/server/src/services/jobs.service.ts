@@ -119,7 +119,7 @@ export class JobService {
               SELECT j.id FROM jobs j
               INNER JOIN batches b ON b.id = j.batch_id
               WHERE j.status = 'PENDING'
-                AND b.status IN ('PROCESSING', 'TRANSCRIBING', 'ANALYZING')
+                AND b.status IN ('PROCESSING', 'TRANSCRIBING', 'ANALYZING', 'DELTA_PROCESSING')
                 ${jobType ? 'AND j.job_type = ?' : ''}
                 AND (j.next_attempt_at IS NULL OR j.next_attempt_at <= ?)
               ORDER BY j.id LIMIT 1

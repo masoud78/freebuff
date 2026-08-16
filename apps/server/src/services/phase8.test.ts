@@ -10,10 +10,14 @@ import {
   apiUsage,
   audioFiles,
   batches,
+  deltaMetrics,
   destinationAliases,
   destinations,
   jobs,
   knowledgeAnalysisRuns,
+  knowledgeCandidates,
+  knowledgeDeltaDecisions,
+  knowledgeEmbeddings,
   knowledgeEvidence,
   knowledgeItems,
   knowledgeVersions,
@@ -105,6 +109,30 @@ class MockGateway implements GeminiGatewayLike {
       analysis: this.analysis,
       usage: { inputTokens: 7, outputTokens: 9, cachedTokens: 0, totalTokens: 16 },
       durationMs: 33,
+    };
+  }
+
+  async createEmbedding() {
+    this.calls += 1;
+    if (this.behavior === 'rate-limit') {
+      throw new GeminiGatewayError('GEMINI_RATE_LIMIT', 'محدودیت نرخ');
+    }
+    return {
+      embedding: [0.1, 0.2, 0.3],
+      usage: { inputTokens: 1, outputTokens: 0, cachedTokens: 0, totalTokens: 1 },
+      durationMs: 5,
+    };
+  }
+
+  async classifyDelta() {
+    this.calls += 1;
+    if (this.behavior === 'rate-limit') {
+      throw new GeminiGatewayError('GEMINI_RATE_LIMIT', 'محدودیت نرخ');
+    }
+    return {
+      classification: { decision: 'NEW' as const, matchedKnowledgeId: 0, confidence: 0.8, reasonCode: 'NEW_FACT' },
+      usage: { inputTokens: 2, outputTokens: 2, cachedTokens: 0, totalTokens: 4 },
+      durationMs: 9,
     };
   }
 }
@@ -201,6 +229,11 @@ after(async () => {
 
 beforeEach(async () => {
   const db = getDatabase();
+  // Phase 9 tables first (FK parents: candidates → runs/transcripts).
+  await db.delete(deltaMetrics);
+  await db.delete(knowledgeDeltaDecisions);
+  await db.delete(knowledgeEmbeddings);
+  await db.delete(knowledgeCandidates);
   await db.delete(apiUsage);
   await db.delete(knowledgeEvidence);
   await db.delete(knowledgeVersions);
@@ -363,10 +396,10 @@ test('invalid segment id is rejected', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Atomic knowledge persistence
+// Knowledge candidates (Phase 9: extraction → candidates, never master)
 // ---------------------------------------------------------------------------
 
-test('atomic knowledge items, V1 versions and evidence are created', async () => {
+test('analysis creates candidates, not master knowledge, plus a delta job', async () => {
   const { batchId, transcriptId, segmentId } = await transcribedBatch('atomic.mp3');
   const gateway = new MockGateway('success', buildAnalysis(segmentId));
   const job = await jobService.claimNextJob('KNOWLEDGE_ANALYSIS');
@@ -374,22 +407,19 @@ test('atomic knowledge items, V1 versions and evidence are created', async () =>
   await knowledgeAnalysisService.analyze(job, gateway);
 
   const db = getDatabase();
+  // Master knowledge is NOT mutated by extraction since Phase 9.
   const items = await db.select().from(knowledgeItems);
-  assert.equal(items.length, 1);
-  assert.equal(items[0]?.knowledgeType, 'FACT');
-  assert.equal(items[0]?.entityName, 'هتل پارس');
+  assert.equal(items.length, 0);
 
-  const versions = await db.select().from(knowledgeVersions);
-  assert.equal(versions.length, 1);
-  assert.equal(versions[0]?.versionNumber, 1);
-  assert.equal(versions[0]?.valueText, '۵ دقیقه');
-  assert.equal(versions[0]?.isCurrent, true);
-
-  const evidence = await db.select().from(knowledgeEvidence);
-  assert.equal(evidence.length, 1);
-  assert.equal(evidence[0]?.knowledgeId, items[0]?.id);
-  assert.equal(evidence[0]?.transcriptId, transcriptId);
-  assert.equal(evidence[0]?.segmentId, segmentId);
+  const candidates = await db.select().from(knowledgeCandidates);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0]?.knowledgeType, 'FACT');
+  assert.equal(candidates[0]?.entityName, 'هتل پارس');
+  assert.equal(candidates[0]?.valueText, '۵ دقیقه');
+  assert.equal(candidates[0]?.status, 'PENDING');
+  assert.equal(candidates[0]?.identityKey.length, 64);
+  assert.equal(candidates[0]?.valueHash.length, 64);
+  assert.equal(candidates[0]?.transcriptId, transcriptId);
 
   const links = await db.select().from(transcriptDestinations);
   assert.equal(links.length, 1);
@@ -404,29 +434,53 @@ test('atomic knowledge items, V1 versions and evidence are created', async () =>
   assert.equal(usage[0]?.inputTokens, 7);
   assert.equal(usage[0]?.totalTokens, 16);
 
+  // Exactly one delta job for this transcript, created in the same txn.
+  const deltaJobs = await db
+    .select()
+    .from(jobs)
+    .where(and(eq(jobs.batchId, batchId), eq(jobs.jobType, 'KNOWLEDGE_DELTA')));
+  assert.equal(deltaJobs.length, 1);
+  assert.equal(deltaJobs[0]?.entityId, transcriptId);
+  assert.equal(deltaJobs[0]?.status, 'PENDING');
+
   const done = await jobService.getJob(job.id);
   assert.equal(done?.status, 'COMPLETED');
-  assert.equal(batchId, batchId);
 });
 
-test('every knowledge item has evidence (no knowledge without evidence)', async () => {
-  const { transcriptId, segmentId } = await transcribedBatch('noevidence.mp3');
-  const gateway = new MockGateway('success', buildAnalysis(segmentId));
+test('low-confidence candidates are rejected entirely', async () => {
+  const { segmentId } = await transcribedBatch('lowconf.mp3');
+  const analysis: KnowledgeAnalysis = {
+    destinations: [],
+    knowledge: [
+      {
+        destinationReference: null,
+        knowledgeType: 'FACT',
+        category: null,
+        entityType: null,
+        entityName: 'هتل',
+        attribute: 'کیفیت',
+        value: 'خوب',
+        unit: null,
+        qualifiers: [],
+        canonicalText: 'کیفیت خوب است.',
+        sourceSegmentIds: [segmentId],
+        confidence: 0.1,
+      },
+    ],
+  };
+  const gateway = new MockGateway('success', analysis);
   const job = await jobService.claimNextJob('KNOWLEDGE_ANALYSIS');
   assert.ok(job);
   await knowledgeAnalysisService.analyze(job, gateway);
 
   const db = getDatabase();
-  const items = await db.select().from(knowledgeItems);
-  assert.ok(items.length >= 1);
-  for (const item of items) {
-    const evidence = await db
-      .select()
-      .from(knowledgeEvidence)
-      .where(eq(knowledgeEvidence.knowledgeId, item.id));
-    assert.ok(evidence.length >= 1, 'every knowledge item has evidence');
-  }
-  assert.equal(transcriptId, transcriptId);
+  const candidates = await db.select().from(knowledgeCandidates);
+  assert.equal(candidates.length, 0, 'low confidence is never persisted');
+  const deltaJobs = await db
+    .select()
+    .from(jobs)
+    .where(eq(jobs.jobType, 'KNOWLEDGE_DELTA'));
+  assert.equal(deltaJobs.length, 0, 'no candidates means no delta job');
 });
 
 // ---------------------------------------------------------------------------
@@ -592,10 +646,9 @@ test('analysis survives database reopen', async () => {
   await initDatabase();
 
   const db = getDatabase();
-  const items = await db.select().from(knowledgeItems);
-  assert.equal(items.length, 1);
-  const versions = await db.select().from(knowledgeVersions);
-  assert.equal(versions[0]?.versionNumber, 1);
+  const candidates = await db.select().from(knowledgeCandidates);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0]?.valueHash.length, 64);
 });
 
 // ---------------------------------------------------------------------------

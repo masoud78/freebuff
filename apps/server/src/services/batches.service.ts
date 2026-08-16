@@ -17,6 +17,7 @@ import {
   transcripts,
 } from '../core/database/schema.js';
 import { audioIngestionService } from './audio-ingestion.service.js';
+import { candidatesService } from './knowledge/candidates.service.js';
 import { DomainError } from './errors.js';
 import { jobService } from './jobs.service.js';
 import { getWorkspaceAudioDir } from './workspace-paths.js';
@@ -66,6 +67,13 @@ async function computeStats(batchId: number): Promise<BatchStats> {
     .where(eq(knowledgeItems.firstSeenBatchId, batchId))
     .get();
 
+  // Delta phase: candidates + KNOWLEDGE_DELTA jobs.
+  const candidateCounts = await candidatesService.countByBatchStatus(batchId);
+  const deltaPending = await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_DELTA', 'PENDING');
+  const deltaComparing = await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_DELTA', 'RUNNING');
+  const deltaDecided = await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_DELTA', 'COMPLETED');
+  const deltaFailed = await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_DELTA', 'FAILED');
+
   return {
     totalAudio: Number(totalAudio?.count ?? 0),
     newAudio: (await countBy('QUEUED')) + (await countBy('REGISTERED')) + (await countBy('TRANSCRIBING')) + (await countBy('TRANSCRIBED')),
@@ -79,6 +87,13 @@ async function computeStats(batchId: number): Promise<BatchStats> {
     knowledgeAnalyzed,
     detectedDestinations: Number(detectedDestinations?.count ?? 0),
     extractedKnowledge: Number(extractedKnowledge?.count ?? 0),
+    candidatesPending: candidateCounts.PENDING,
+    candidatesDecided: candidateCounts.DECIDED,
+    candidatesFailed: candidateCounts.FAILED,
+    deltaPending,
+    deltaComparing,
+    deltaDecided,
+    deltaFailed,
   };
 }
 
@@ -121,6 +136,13 @@ export class BatchService {
           knowledgeAnalyzed: 0,
           detectedDestinations: 0,
           extractedKnowledge: 0,
+          candidatesPending: 0,
+          candidatesDecided: 0,
+          candidatesFailed: 0,
+          deltaPending: 0,
+          deltaComparing: 0,
+          deltaDecided: 0,
+          deltaFailed: 0,
         },
       );
     } catch (error) {
@@ -309,6 +331,13 @@ export class BatchService {
       failed: await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_ANALYSIS', 'FAILED'),
     };
     const knowledgeTotal = knowledge.pending + knowledge.running + knowledge.completed + knowledge.failed;
+    const delta = {
+      pending: await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_DELTA', 'PENDING'),
+      running: await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_DELTA', 'RUNNING'),
+      completed: await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_DELTA', 'COMPLETED'),
+      failed: await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_DELTA', 'FAILED'),
+    };
+    const deltaTotal = delta.pending + delta.running + delta.completed + delta.failed;
 
     let status: BatchStatus;
     if (stats.newAudio === 0) {
@@ -316,11 +345,27 @@ export class BatchService {
       // permanently failed files (FAILED).
       status = stats.failedItems > 0 ? 'FAILED' : 'COMPLETED';
     } else if (counts.PENDING > 0 || counts.RUNNING > 0) {
-      // In progress — distinguish the active phase.
-      status = knowledge.pending + knowledge.running > 0 ? 'ANALYZING' : 'TRANSCRIBING';
+      // In progress — distinguish the active phase. Delta processing is its
+      // own phase so the UI can show "Comparing" while delta jobs run.
+      if (delta.pending + delta.running > 0) {
+        status = 'DELTA_PROCESSING';
+      } else if (knowledge.pending + knowledge.running > 0) {
+        status = 'ANALYZING';
+      } else {
+        status = 'TRANSCRIBING';
+      }
+    } else if (deltaTotal > 0) {
+      // Delta phase is terminal. Any failed delta job makes the batch partial;
+      // a clean run is ANALYSIS_COMPLETED.
+      if (delta.failed > 0) {
+        status = delta.completed > 0 || knowledge.completed > 0 ? 'PARTIAL_FAILED' : 'FAILED';
+      } else if (stats.failedItems > 0 || counts.FAILED > 0) {
+        status = 'PARTIAL_FAILED';
+      } else {
+        status = 'ANALYSIS_COMPLETED';
+      }
     } else if (knowledgeTotal > 0) {
-      // Knowledge phase is terminal. Any failed audio (transcription or
-      // knowledge) makes the batch partial; a clean run is ANALYSIS_COMPLETED.
+      // Knowledge phase is terminal (no delta jobs, e.g. no candidates).
       if (knowledge.failed > 0) {
         status = knowledge.completed > 0 || stats.transcribed > 0 ? 'PARTIAL_FAILED' : 'FAILED';
       } else if (stats.failedItems > 0 || counts.FAILED > 0) {

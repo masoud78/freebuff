@@ -1,5 +1,6 @@
 import { ApiError, GoogleGenAI, type File as GeminiFile } from '@google/genai';
 import type {
+  DeltaClassification,
   GeminiErrorCode,
   GeminiModelCapabilities,
   GeminiModelInfo,
@@ -7,7 +8,7 @@ import type {
   KnowledgeAnalysis,
 } from '@freebuff/contracts';
 import { DomainError } from '../errors.js';
-import { knowledgeAnalysisSchema } from '@freebuff/contracts';
+import { deltaClassificationSchema, knowledgeAnalysisSchema } from '@freebuff/contracts';
 
 /**
  * Error thrown by the Gemini gateway. `code` is a stable, normalized
@@ -268,6 +269,137 @@ export class GeminiGateway {
   }
 
   /**
+   * Create a text embedding with the configured embedding model. Returns the
+   * raw vector plus real usage data. All embedding requests go through this
+   * gateway — no feature module calls the SDK directly.
+   */
+  async createEmbedding(input: {
+    apiKey: string;
+    modelId: string;
+    text: string;
+  }): Promise<{ embedding: number[]; usage: GeminiUsage; durationMs: number }> {
+    const ai = new GoogleGenAI({ apiKey: input.apiKey });
+    const started = Date.now();
+    try {
+      const response = await ai.models.embedContent({
+        model: input.modelId,
+        contents: input.text,
+      });
+      const values = response.embeddings?.[0]?.values;
+      if (!values || values.length === 0) {
+        throw new GeminiGatewayError('GEMINI_API_ERROR', 'خروجی Embedding خالی بود.', {
+          durationMs: Date.now() - started,
+        });
+      }
+      // This SDK version does not expose usage metadata on embedContent —
+      // null (never estimated) per project convention.
+      return {
+        embedding: values,
+        usage: { inputTokens: null, outputTokens: null, cachedTokens: null, totalTokens: null },
+        durationMs: Date.now() - started,
+      };
+    } catch (error) {
+      if (error instanceof GeminiGatewayError) throw error;
+      const normalized = toGeminiGatewayError(error);
+      throw new GeminiGatewayError(normalized.code as GeminiErrorCode, normalized.message, {
+        cause: normalized.cause,
+        retryable: normalized.retryable,
+        durationMs: Date.now() - started,
+      });
+    }
+  }
+
+  /**
+   * One structured delta comparison: the candidate plus a small set of
+   * relevant existing knowledge. Output is forced to the delta JSON schema
+   * and re-validated with the shared Zod contract before any DB write.
+   */
+  async classifyDelta(input: {
+    apiKey: string;
+    modelId: string;
+    systemPrompt: string;
+    payload: {
+      candidate: {
+        canonicalText: string;
+        knowledgeType: string;
+        entityName: string | null;
+        attribute: string | null;
+        valueText: string | null;
+        unit: string | null;
+        confidence: number;
+      };
+      destination: string | null;
+      existingKnowledge: {
+        id: number;
+        canonicalText: string;
+        valueText: string | null;
+        unit: string | null;
+        sourceCount: number;
+      }[];
+    };
+  }): Promise<{ classification: DeltaClassification; usage: GeminiUsage; durationMs: number }> {
+    const ai = new GoogleGenAI({ apiKey: input.apiKey });
+    const started = Date.now();
+    try {
+      const response = await ai.models.generateContent({
+        model: input.modelId,
+        contents: [
+          { role: 'user', parts: [{ text: JSON.stringify(input.payload) }] },
+        ],
+        config: {
+          systemInstruction: { role: 'system', parts: [{ text: input.systemPrompt }] },
+          responseJsonSchema: {
+            type: 'object',
+            properties: {
+              decision: {
+                type: 'string',
+                enum: ['NEW', 'CONFIRMATION', 'UPDATE', 'CONFLICT', 'IGNORE'],
+              },
+              matchedKnowledgeId: { type: 'integer' },
+              confidence: { type: 'number' },
+              reasonCode: { type: 'string' },
+            },
+            required: ['decision', 'matchedKnowledgeId', 'confidence', 'reasonCode'],
+          },
+        },
+      });
+
+      const raw = response.text ?? '';
+      if (raw.trim().length === 0) {
+        throw new GeminiGatewayError('GEMINI_API_ERROR', 'مقایسه دانش خروجی خالی برگرداند.', {
+          durationMs: Date.now() - started,
+        });
+      }
+      const jsonStart = raw.indexOf('{');
+      const jsonEnd = raw.lastIndexOf('}');
+      const json = jsonStart >= 0 && jsonEnd > jsonStart ? raw.slice(jsonStart, jsonEnd + 1) : raw;
+      const parsed = JSON.parse(json) as unknown;
+      const result = deltaClassificationSchema.safeParse(parsed);
+      if (!result.success) {
+        throw new GeminiGatewayError(
+          'GEMINI_API_ERROR',
+          'خروجی ساخت‌یافته مقایسه دانش نامعتبر بود.',
+          { cause: result.error.message, durationMs: Date.now() - started },
+        );
+      }
+
+      return {
+        classification: result.data,
+        usage: normalizeUsage(response.usageMetadata),
+        durationMs: Date.now() - started,
+      };
+    } catch (error) {
+      if (error instanceof GeminiGatewayError) throw error;
+      const normalized = toGeminiGatewayError(error);
+      throw new GeminiGatewayError(normalized.code as GeminiErrorCode, normalized.message, {
+        cause: normalized.cause,
+        retryable: normalized.retryable,
+        durationMs: Date.now() - started,
+      });
+    }
+  }
+
+  /**
    * Structured knowledge analysis of a transcript. Uses the official JSON
    * schema support (responseJsonSchema) so the output is always structured;
    * the raw text is then validated again with the shared Zod contract before
@@ -380,5 +512,10 @@ export const geminiGateway = new GeminiGateway();
 /** Public surface used by the worker and by test doubles. */
 export type GeminiGatewayLike = Pick<
   GeminiGateway,
-  'testConnection' | 'listModels' | 'transcribeAudio' | 'analyzeKnowledge'
+  | 'testConnection'
+  | 'listModels'
+  | 'transcribeAudio'
+  | 'analyzeKnowledge'
+  | 'createEmbedding'
+  | 'classifyDelta'
 >;

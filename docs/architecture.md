@@ -58,6 +58,23 @@
 - Batch State: READY → PROCESSING با `/api/batches/:id/start`؛ وقتی همه Jobها Terminal شوند: همه موفق → COMPLETED، بخشی → PARTIAL_FAILED، هیچ‌کدام → FAILED.
 - Transcript متنی در SQLite Source of Truth است؛ خروجی Gemini نگه داشته می‌شود (`full_text`) و نسخه نرمال‌شده فارسی (`normalized_text` + `normalized_hash` SHA-256) برای جلوگیری از پردازش مجدد/تشخیص تکراری ذخیره می‌شود.
 
+## Knowledge Delta Pipeline (Phase 9)
+
+از فاز ۹، استخراج دانش دیگر مستقیماً Master Knowledge نمی‌سازد — ابتدا `knowledge_candidates` تولید می‌شوند و بعد موتور Delta تصمیم می‌گیرد (Reconciliation نهایی در فاز ۱۰):
+
+```text
+Transcript → Knowledge Extraction → Candidates → Exact Gate → Embedding+Retrieval → Delta Decision
+```
+
+- **Candidates:** هر خروجی Gemini یک ردیف `knowledge_candidates` است (`identity_key` و `value_hash` سمت Backend محاسبه می‌شوند — هرگز از Gemini). برای هر Transcript با Candidate، دقیقاً یک Job `KNOWLEDGE_DELTA` در همان Transaction ساخته می‌شود.
+- **Exact Gate:** اگر `identity_key` و `value_hash` با دانش موجود مقصد یکی باشد → `CONFIRMATION` قطعی بدون هیچ Gemini Call (شمارنده `exact_confirmation_count`).
+- **Retrieval:** فقط داخل مقصد Candidate (`destination_id`) و محدود (`maxRetrievedItems=6`، `maxRetrievedCharacters=4000`، `similarityCandidateLimit=40`) — هرگز کل پایگاه در Memory بارگذاری نمی‌شود. ترکیبی از Identity، Entity/Attribute، Lexical (LIKE) و Semantic (cosine روی پول محدود).
+- **Embedding:** مدل فقط از `model_configs` با `stage=EMBEDDING`؛ همهٔ درخواست‌ها از `GeminiGateway.createEmbedding`؛ Cache روی `(model_id, source_hash)` — متن یکسان با مدل یکسان هرگز دوباره Embed نمی‌شود (`embedding_cache_hit_count`). متن Embedding فقط از `buildKnowledgeEmbeddingText()` ساخته می‌شود.
+- **Decisions:** `knowledge_delta_decisions` با `NEW / CONFIRMATION / UPDATE / CONFLICT / IGNORE`. Similarity به‌تنهایی تصمیم نمی‌گیرد؛ موارد مبهم با مقایسهٔ ساخت‌یافته Gemini (فقط Candidate + Top Relevant + Contract داخلی ثابت) و اعتبارسنجی Zod تصمیم می‌گیرند. مقادیر حساس (قیمت/فاصله/زمان/…) هرگز با تشابه بالا تأیید خودکار نمی‌شوند.
+- **Same-batch:** Candidateهای تکراری همان Batch `CONFIRMATION` (نسبت به همان تصمیم) و ادعاهای متناقض `CONFLICT` می‌شوند — چند `NEW` تکراری ساخته نمی‌شود.
+- **کارایی:** Idempotency با `input_signature` (Candidate + مدل/پرامپت) → `delta_ai_call_skipped_count`؛ Usage واقعی با stageهای `KNOWLEDGE` و `EMBEDDING` در `api_usage`؛ Retry با Backoff برای 429/5xx/شبکه.
+- **UI:** صفحهٔ Batch وضعیت Delta (Knowledge extracted / Delta pending / Comparing / Delta decided / Failed) و بخش «Knowledge Decisions» با بج تصمیم، دانش تطبیق‌شده، اطمینان و Retrieval قابل Debug را نشان می‌دهد.
+
 ## خارج از محدوده فعلی
 
-عمداً ساخته نشده‌اند: Authentication، Docker، Redis، Microservices، Vector Database، Destination Detection، Knowledge Extraction/Reconciliation، Embeddings و Content Generation. زیرساخت لازم (GeminiGateway، model config، پرامپت‌ها، readiness، Batch/Job، Worker، Transcript) آماده است؛ فقط Transcription اجرا می‌شود و بقیه Pipelineها در فازهای بعد ساخته می‌شوند.
+عمداً ساخته نشده‌اند: Authentication، Docker، Redis، Microservices، Vector Database خارجی، Master Reconciliation نهایی (فاز ۱۰) و Content Generation (فاز ۱۱+). زیرساخت لازم (GeminiGateway، model config، پرامپت‌ها، readiness، Batch/Job، Worker، Transcript، Candidates/Delta) آماده است.

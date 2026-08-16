@@ -10,9 +10,10 @@ import { modelsService } from '../models.service.js';
 import { promptsService } from '../prompts.service.js';
 import { jobService } from '../jobs.service.js';
 import { batchService } from '../batches.service.js';
+import { candidatesService } from './candidates.service.js';
 import { destinationService } from './destinations.service.js';
-import { buildKnowledgeIdentityKey } from './identity.js';
-import { knowledgeService, KNOWLEDGE_CONFIDENCE_MIN } from './knowledge.service.js';
+import { buildKnowledgeIdentityKey, buildKnowledgeValueHash } from './identity.js';
+import { KNOWLEDGE_CONFIDENCE_MIN } from './knowledge.service.js';
 
 interface AnalyzeResult {
   analysis: KnowledgeAnalysis;
@@ -106,14 +107,22 @@ export class KnowledgeAnalysisService {
     }
 
     const started = new Date();
-    await db.insert(knowledgeAnalysisRuns).values({
-      transcriptId: transcript.id,
-      modelId,
-      promptVersionId: prompt.id,
-      inputSignature: signature,
-      status: 'RUNNING',
-      createdAt: started,
-    });
+    const runInserted = await db
+      .insert(knowledgeAnalysisRuns)
+      .values({
+        transcriptId: transcript.id,
+        modelId,
+        promptVersionId: prompt.id,
+        inputSignature: signature,
+        status: 'RUNNING',
+        createdAt: started,
+      })
+      .returning({ id: knowledgeAnalysisRuns.id });
+    const analysisRunId = runInserted[0]?.id;
+    if (analysisRunId === undefined) {
+      await this.recordFailedRun(signature, 'FAILED');
+      throw new DomainError('KNOWLEDGE_SAVE_FAILED', 'ثبت تحلیل دانش ممکن نشد.');
+    }
 
     let result: AnalyzeResult;
     try {
@@ -147,7 +156,7 @@ export class KnowledgeAnalysisService {
     try {
       await this.validateSegments(transcript.id, analysis);
       await db.transaction(async (tx) => {
-        await this.persistAnalysis(tx, job, transcript, analysis);
+        await this.persistAnalysis(tx, job, transcript, analysis, analysisRunId);
       });
     } catch (error) {
       await this.recordFailedRun(signature, 'FAILED');
@@ -167,12 +176,18 @@ export class KnowledgeAnalysisService {
     await batchService.refreshBatchState(batchId);
   }
 
-  /** All persistence of one analysis happens in a single transaction. */
+  /**
+   * All persistence of one analysis happens in a single transaction. Since
+   * Phase 9, extraction produces knowledge CANDIDATES — never direct master
+   * knowledge. The delta job for this transcript is created in the same
+   * transaction so a crash can never leave candidates without a delta job.
+   */
   private async persistAnalysis(
     tx: DbExecutor,
     job: JobRow,
     transcript: typeof transcripts.$inferSelect,
     analysis: KnowledgeAnalysis,
+    analysisRunId: number,
   ): Promise<void> {
     const { batchId } = job;
     const resolvedDestinations = new Map<string, number>();
@@ -188,15 +203,7 @@ export class KnowledgeAnalysisService {
       await destinationService.linkTranscript(transcript.id, resolved.id, resolved.confidence, tx);
     }
 
-    const segmentText = new Map(
-      (
-        await tx
-          .select({ id: transcriptSegments.id, text: transcriptSegments.text })
-          .from(transcriptSegments)
-          .where(eq(transcriptSegments.transcriptId, transcript.id))
-      ).map((row) => [row.id, row.text]),
-    );
-
+    let createdAny = false;
     for (const candidate of analysis.knowledge) {
       // Low confidence → rejected, never persisted.
       if (candidate.confidence < KNOWLEDGE_CONFIDENCE_MIN) continue;
@@ -205,7 +212,6 @@ export class KnowledgeAnalysisService {
         ? (resolvedDestinations.get(candidate.destinationReference) ?? null)
         : null;
 
-      const firstSegmentId = candidate.sourceSegmentIds[0] ?? null;
       const identityKey = buildKnowledgeIdentityKey({
         destinationId,
         knowledgeType: candidate.knowledgeType,
@@ -213,30 +219,48 @@ export class KnowledgeAnalysisService {
         attribute: candidate.attribute,
         scope: candidate.category ?? DEFAULT_SCOPE,
       });
-
-      await knowledgeService.createKnowledge({
-        destinationId,
-        knowledgeType: candidate.knowledgeType,
-        category: candidate.category,
-        entityType: candidate.entityType,
-        entityName: candidate.entityName,
-        attribute: candidate.attribute,
-        value: candidate.value,
+      const valueHash = buildKnowledgeValueHash({
+        valueText: candidate.value,
         unit: candidate.unit,
         qualifiers: candidate.qualifiers,
-        canonicalText: candidate.canonicalText,
-        identityKey,
-        confidence: candidate.confidence,
-        firstSeenBatchId: batchId,
-        evidence: {
-          batchId,
-          audioId: transcript.audioId,
-          transcriptId: transcript.id,
-          segmentId: firstSegmentId,
-          sourceText: firstSegmentId !== null ? (segmentText.get(firstSegmentId) ?? '') : transcript.fullText.slice(0, 500),
-        },
-        db: tx,
       });
+
+      await candidatesService.createCandidate(
+        {
+          analysisRunId,
+          batchId,
+          transcriptId: transcript.id,
+          destinationId,
+          knowledgeType: candidate.knowledgeType,
+          category: candidate.category,
+          entityType: candidate.entityType,
+          entityName: candidate.entityName,
+          attribute: candidate.attribute,
+          valueText: candidate.value,
+          valueJson: null,
+          unit: candidate.unit,
+          qualifiers: candidate.qualifiers,
+          canonicalText: candidate.canonicalText,
+          identityKey,
+          valueHash,
+          confidence: candidate.confidence,
+        },
+        tx,
+      );
+      createdAny = true;
+    }
+
+    // One persistent delta job per transcript, in the same transaction.
+    if (createdAny) {
+      await jobService.createJob(
+        {
+          batchId,
+          jobType: 'KNOWLEDGE_DELTA',
+          entityId: transcript.id,
+          idempotencyKey: `KNOWLEDGE_DELTA:${transcript.id}`,
+        },
+        tx,
+      );
     }
   }
 

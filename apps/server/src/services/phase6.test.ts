@@ -80,6 +80,13 @@ test('create batch', async () => {
     knowledgeAnalyzed: 0,
     detectedDestinations: 0,
     extractedKnowledge: 0,
+    candidatesPending: 0,
+    candidatesDecided: 0,
+    candidatesFailed: 0,
+    deltaPending: 0,
+    deltaComparing: 0,
+    deltaDecided: 0,
+    deltaFailed: 0,
   });
 });
 

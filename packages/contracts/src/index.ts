@@ -95,6 +95,17 @@ export const knowledgeErrorCodes = [
 
 export type KnowledgeErrorCode = (typeof knowledgeErrorCodes)[number];
 
+export const deltaErrorCodes = [
+  'DELTA_MODEL_NOT_CONFIGURED',
+  'EMBEDDING_MODEL_NOT_CONFIGURED',
+  'EMBEDDING_FAILED',
+  'DELTA_CLASSIFICATION_INVALID',
+  'DELTA_PROCESSING_FAILED',
+  'CANDIDATE_NOT_FOUND',
+] as const;
+
+export type DeltaErrorCode = (typeof deltaErrorCodes)[number];
+
 export const apiErrorCodes = [
   ...settingsErrorCodes,
   ...geminiErrorCodes,
@@ -104,6 +115,7 @@ export const apiErrorCodes = [
   ...batchErrorCodes,
   ...transcriptionErrorCodes,
   ...knowledgeErrorCodes,
+  ...deltaErrorCodes,
 ] as const;
 
 export type ApiErrorCode = (typeof apiErrorCodes)[number];
@@ -270,6 +282,7 @@ export const batchStatuses = [
   'PROCESSING',
   'TRANSCRIBING',
   'ANALYZING',
+  'DELTA_PROCESSING',
   'ANALYSIS_COMPLETED',
   'COMPLETED',
   'PARTIAL_FAILED',
@@ -294,7 +307,7 @@ export type AudioStatus = (typeof audioStatuses)[number];
 export const jobStatuses = ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED'] as const;
 export type JobStatus = (typeof jobStatuses)[number];
 
-export const jobTypes = ['TRANSCRIPTION', 'KNOWLEDGE_ANALYSIS'] as const;
+export const jobTypes = ['TRANSCRIPTION', 'KNOWLEDGE_ANALYSIS', 'KNOWLEDGE_DELTA'] as const;
 export type JobType = (typeof jobTypes)[number];
 
 /** Extensions accepted for audio ingestion. */
@@ -325,6 +338,20 @@ export interface BatchStats {
   detectedDestinations: number;
   /** Total extracted knowledge items from this batch. */
   extractedKnowledge: number;
+  /** Knowledge candidates waiting for delta comparison. */
+  candidatesPending: number;
+  /** Knowledge candidates with a delta decision. */
+  candidatesDecided: number;
+  /** Knowledge candidates that failed delta processing. */
+  candidatesFailed: number;
+  /** KNOWLEDGE_DELTA jobs waiting to run. */
+  deltaPending: number;
+  /** KNOWLEDGE_DELTA jobs currently comparing. */
+  deltaComparing: number;
+  /** KNOWLEDGE_DELTA jobs completed. */
+  deltaDecided: number;
+  /** KNOWLEDGE_DELTA jobs failed. */
+  deltaFailed: number;
 }
 
 export interface BatchSummary {
@@ -373,7 +400,7 @@ export interface ScanResult {
 export const transcriptStatuses = ['COMPLETED', 'FAILED'] as const;
 export type TranscriptStatus = (typeof transcriptStatuses)[number];
 
-export const apiUsageStages = ['TRANSCRIPTION', 'KNOWLEDGE'] as const;
+export const apiUsageStages = ['TRANSCRIPTION', 'KNOWLEDGE', 'EMBEDDING'] as const;
 export type ApiUsageStage = (typeof apiUsageStages)[number];
 
 export const apiUsageStatuses = ['SUCCESS', 'FAILED'] as const;
@@ -523,6 +550,82 @@ export interface DestinationDetailResponse extends DestinationSummary {
 }
 
 /** Knowledge attached to a transcript, for the transcript viewer. */
+// ---------------------------------------------------------------------------
+// Knowledge Delta (Phase 9)
+// ---------------------------------------------------------------------------
+
+export const deltaDecisionValues = ['NEW', 'CONFIRMATION', 'UPDATE', 'CONFLICT', 'IGNORE'] as const;
+export type DeltaDecision = (typeof deltaDecisionValues)[number];
+
+export const candidateStatuses = ['PENDING', 'DECIDED', 'FAILED'] as const;
+export type CandidateStatus = (typeof candidateStatuses)[number];
+
+/**
+ * Structured Gemini output for one delta comparison. `matchedKnowledgeId`
+ * uses 0 on the wire for "no existing knowledge" (structured output cannot
+ * express null reliably); the backend maps 0 → null before persisting.
+ */
+export const deltaClassificationSchema = z.object({
+  decision: z.enum(deltaDecisionValues, { message: 'تصمیم نامعتبر است.' }),
+  matchedKnowledgeId: z.number().int().min(0).default(0),
+  confidence: z.number().min(0).max(1).default(0.5),
+  reasonCode: z.string().max(60).default(''),
+});
+
+export type DeltaClassification = z.infer<typeof deltaClassificationSchema>;
+
+/** Stable metric keys for token/API savings (Phase 11 will surface them). */
+export const deltaMetricKeys = [
+  'exact_confirmation_count',
+  'embedding_cache_hit_count',
+  'delta_ai_call_skipped_count',
+] as const;
+export type DeltaMetricKey = (typeof deltaMetricKeys)[number];
+
+/** One knowledge candidate with its delta decision, for the batch UI. */
+export interface KnowledgeCandidateInfo {
+  id: number;
+  transcriptId: number;
+  destinationId: number | null;
+  destinationName: string | null;
+  knowledgeType: KnowledgeType;
+  entityName: string | null;
+  attribute: string | null;
+  valueText: string | null;
+  unit: string | null;
+  canonicalText: string;
+  status: CandidateStatus;
+  createdAt: string;
+  decision: {
+    decision: DeltaDecision | null;
+    confidence: number | null;
+    reasonCode: string | null;
+    matchedKnowledgeId: number | null;
+    matchedKnowledgeText: string | null;
+    matchedCandidateId: number | null;
+  };
+}
+
+export interface KnowledgeDecisionsResponse {
+  batchId: number;
+  candidates: KnowledgeCandidateInfo[];
+}
+
+/** One retrieval hit, exposed for debuggable retrieval in the UI. */
+export interface CandidateRetrievalMatch {
+  knowledgeId: number;
+  canonicalText: string;
+  matchType: 'identity' | 'entity_attribute' | 'lexical' | 'semantic';
+  similarity: number | null;
+}
+
+export interface CandidateRetrievalDebugResponse {
+  candidateId: number;
+  destinationId: number | null;
+  destinationName: string | null;
+  matches: CandidateRetrievalMatch[];
+}
+
 export interface TranscriptKnowledgeInfo {
   destinations: {
     id: number;

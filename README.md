@@ -2,7 +2,7 @@
 
 یک اپلیکیشن Local-first AI برای پردازش محتوای صوتی و متنی با Gemini.
 
-فازهای تکمیل‌شده: زیرساخت پروژه، Database (SQLite + Drizzle)، Application Shell، Settings عمومی، پیکربندی کامل Gemini (کلید امن، کش مدل‌ها، انتخاب مدل هر Stage، پرامپت‌های نسخه‌دار)، Batch/Audio Ingestion با Job Engine پایدار (SHA-256 Dedup، صف Job داخل SQLite، Recovery بعد از Restart)، و **Pipeline واقعی Transcription** (Worker پایدار با Concurrency، Retry با Backoff، ذخیره Transcript و Segments، Idempotency، ثبت مصرف API و نمایش پیشرفت زنده در UI).
+فازهای تکمیل‌شده: زیرساخت پروژه، Database (SQLite + Drizzle)، Application Shell، Settings عمومی، پیکربندی کامل Gemini (کلید امن، کش مدل‌ها، انتخاب مدل هر Stage، پرامپت‌های نسخه‌دار)، Batch/Audio Ingestion با Job Engine پایدار (SHA-256 Dedup، صف Job داخل SQLite، Recovery بعد از Restart)، **Pipeline واقعی Transcription** (Worker پایدار با Concurrency، Retry با Backoff، ذخیره Transcript و Segments، Idempotency، ثبت مصرف API و نمایش پیشرفت زنده در UI)، **Knowledge Extraction به صورت Candidate**، و **Knowledge Delta Engine (Phase 9)** — مقایسهٔ هر Candidate با دانش قبلی مقصد (Exact Gate قطعی، Embedding با Cache، Retrieval هیبرید مقصد-محور و محدود، مقایسهٔ ساخت‌یافته Gemini، تصمیم‌های NEW/CONFIRMATION/UPDATE/CONFLICT/IGNORE، Dedup داخل Batch، ثبت مصرف و متریک‌های صرفه‌جویی Token) — بدون Mutation نهایی Master Knowledge (فاز ۱۰).
 
 ## پیش‌نیازها
 
