@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.vite/
+coverage/
+
+# Environment files (never commit any env file)
+.env
+.env.*
+!.env.example
+
+# Local database (workspace/system/database/)
+workspace/system/database/
+
+# Local secrets (Gemini API key — never committed)
+workspace/system/secrets/
+
+# User audio files (large, private — never committed)
+workspace/audio/
+
+# Stray debug workspaces under apps (never committed)
+apps/**/workspace/
+
+# Freebuff tooling & preview state
+.freebuff/
+
+# SQLite artifacts
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db

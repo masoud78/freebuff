@@ -1,0 +1,27 @@
+{
+  "name": "freebuff",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @freebuff/web --filter @freebuff/server run dev",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "eslint .",
+    "test": "pnpm -r run test",
+    "db:generate": "pnpm --filter @freebuff/server db:generate",
+    "db:migrate": "pnpm --filter @freebuff/server db:migrate",
+    "db:studio": "pnpm --filter @freebuff/server db:studio"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.0",
+    "eslint": "^10.8.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.67.0"
+  }
+}

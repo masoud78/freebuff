@@ -1,0 +1,384 @@
+import { ApiError, GoogleGenAI, type File as GeminiFile } from '@google/genai';
+import type {
+  GeminiErrorCode,
+  GeminiModelCapabilities,
+  GeminiModelInfo,
+  GeminiUsage,
+  KnowledgeAnalysis,
+} from '@freebuff/contracts';
+import { DomainError } from '../errors.js';
+import { knowledgeAnalysisSchema } from '@freebuff/contracts';
+
+/**
+ * Error thrown by the Gemini gateway. `code` is a stable, normalized
+ * `GeminiErrorCode`; `message` is a safe, user-facing Persian message.
+ * The API key never appears in the message or in the logged cause chain.
+ * Extends DomainError so API routes map it to a controlled 400 response.
+ * `retryable` tells the job engine whether a retry makes sense.
+ */
+export class GeminiGatewayError extends DomainError {
+  readonly retryable: boolean;
+  readonly durationMs: number | null;
+
+  constructor(
+    code: GeminiErrorCode,
+    message: string,
+    options?: { cause?: unknown; retryable?: boolean; durationMs?: number },
+  ) {
+    super(code, message, options);
+    this.name = 'GeminiGatewayError';
+    this.retryable = options?.retryable ?? (code === 'GEMINI_RATE_LIMIT' || code === 'GEMINI_NETWORK_ERROR');
+    this.durationMs = options?.durationMs ?? null;
+  }
+}
+
+const API_KEY_MESSAGE = /api key|apikey|invalid key|permission denied|unauthorized/i;
+const NETWORK_MESSAGE = /fetch failed|socket|econn|etimedout|enotfound|eai_again|tls/i;
+
+/** Map any SDK/network failure to a normalized GeminiGatewayError. */
+export function toGeminiGatewayError(error: unknown): GeminiGatewayError {
+  if (error instanceof GeminiGatewayError) return error;
+
+  if (error instanceof ApiError) {
+    const status = error.status;
+    const raw = String(error.message);
+
+    if (status === 401 || status === 403 || (status === 400 && API_KEY_MESSAGE.test(raw))) {
+      return new GeminiGatewayError(
+        'GEMINI_AUTH_ERROR',
+        'کلید API نامعتبر است. کلید جدیدی وارد کنید.',
+        { cause: error },
+      );
+    }
+    if (status === 429) {
+      return new GeminiGatewayError(
+        'GEMINI_RATE_LIMIT',
+        'محدودیت نرخ درخواست Gemini فعال شد. کمی بعد دوباره تلاش کنید.',
+        { cause: error },
+      );
+    }
+    // Transient 5xx errors are safe to retry; permanent 4xx are not.
+    return new GeminiGatewayError(
+      'GEMINI_API_ERROR',
+      'ارتباط با Gemini با خطا مواجه شد. وضعیت سرویس را بررسی کنید.',
+      { cause: error, retryable: status >= 500 },
+    );
+  }
+
+  if (error instanceof Error) {
+    const raw = `${error.name} ${String(error.message)} ${String(error.cause ?? '')}`;
+    if (NETWORK_MESSAGE.test(raw)) {
+      return new GeminiGatewayError(
+        'GEMINI_NETWORK_ERROR',
+        'ارتباط با سرورهای Gemini برقرار نشد. اتصال اینترنت را بررسی کنید.',
+        { cause: error },
+      );
+    }
+  }
+
+  return new GeminiGatewayError(
+    'GEMINI_API_ERROR',
+    'خطای غیرمنتظره‌ای در ارتباط با Gemini رخ داد.',
+    { cause: error },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Transcription
+// ---------------------------------------------------------------------------
+
+const FILE_ACTIVE_POLL_MS = 1000;
+const FILE_ACTIVE_TIMEOUT_MS = 60_000;
+
+export interface TranscribeAudioInput {
+  apiKey: string;
+  modelId: string;
+  audioPath: string;
+  mimeType: string;
+  systemPrompt: string;
+}
+
+export interface TranscribeAudioResult {
+  text: string;
+  usage: GeminiUsage;
+  durationMs: number;
+}
+
+function normalizeUsage(metadata: {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  cachedContentTokenCount?: number;
+  totalTokenCount?: number;
+} | undefined): GeminiUsage {
+  return {
+    inputTokens: metadata?.promptTokenCount ?? null,
+    outputTokens: metadata?.candidatesTokenCount ?? null,
+    cachedTokens: metadata?.cachedContentTokenCount ?? null,
+    totalTokens: metadata?.totalTokenCount ?? null,
+  };
+}
+
+function stripModelsPrefix(name: string): string {
+  return name.replace(/^models\//, '');
+}
+
+/**
+ * Derive capabilities from official metadata (`supportedActions`) when
+ * available; fall back to a conservative name heuristic only when the
+ * metadata is absent. Audio capability is never guessed from the name.
+ */
+function detectCapabilities(model: {
+  id: string;
+  supportedActions?: string[];
+}): GeminiModelCapabilities {
+  const actions = model.supportedActions ?? [];
+  if (actions.length > 0) {
+    return {
+      generative: actions.includes('generateContent'),
+      embedding: actions.includes('embedContent'),
+      audio: actions.includes('transcribeAudio') || actions.includes('generateAudio'),
+    };
+  }
+
+  // Conservative name-based fallback — no audio guessing here.
+  const id = model.id.toLowerCase();
+  if (id.includes('embed')) {
+    return { generative: false, embedding: true, audio: false };
+  }
+  if (id.startsWith('gemini')) {
+    return { generative: true, embedding: false, audio: false };
+  }
+  return { generative: false, embedding: false, audio: false };
+}
+
+/**
+ * Central gateway for all Gemini communication. Future capabilities
+ * (transcribeAudio, generateStructuredContent, generateContent,
+ * createEmbedding) will be added here so the SDK never leaks into
+ * feature modules.
+ */
+export class GeminiGateway {
+  testConnection(apiKey: string): Promise<void> {
+    return this.listModels(apiKey).then(() => undefined);
+  }
+
+  /**
+   * Transcribe an audio file with Gemini. Uploads the file to the Gemini Files
+   * API (handling the remote-file lifecycle), sends it with the configured
+   * model and system prompt, and returns the raw text plus real usage data.
+   */
+  async transcribeAudio(input: TranscribeAudioInput): Promise<TranscribeAudioResult> {
+    const ai = new GoogleGenAI({ apiKey: input.apiKey });
+    const started = Date.now();
+    let uploadedName: string | null = null;
+    try {
+      const uploaded = await ai.files.upload({
+        file: input.audioPath,
+        config: { mimeType: input.mimeType },
+      });
+      uploadedName = uploaded.name ?? null;
+      const file = await this.waitForActiveFile(ai, uploaded);
+
+      const response = await ai.models.generateContent({
+        model: input.modelId,
+        contents: [{ role: 'user', parts: [{ fileData: { fileUri: file.uri } }] }],
+        config: {
+          systemInstruction: { role: 'system', parts: [{ text: input.systemPrompt }] },
+        },
+      });
+
+      return {
+        text: response.text ?? '',
+        usage: normalizeUsage(response.usageMetadata),
+        durationMs: Date.now() - started,
+      };
+    } catch (error) {
+      const normalized = toGeminiGatewayError(error);
+      throw new GeminiGatewayError(normalized.code as GeminiErrorCode, normalized.message, {
+        cause: normalized.cause,
+        retryable: normalized.retryable,
+        durationMs: Date.now() - started,
+      });
+    } finally {
+      // The remote file is temporary — release it regardless of outcome.
+      if (uploadedName) {
+        try {
+          await ai.files.delete({ name: uploadedName });
+        } catch {
+          // Best-effort cleanup; Gemini expires files automatically.
+        }
+      }
+    }
+  }
+
+  private async waitForActiveFile(ai: GoogleGenAI, file: GeminiFile): Promise<{ uri: string }> {
+    if (!file.name) {
+      if (file.uri) return { uri: file.uri };
+      throw new GeminiGatewayError('GEMINI_API_ERROR', 'آپلود فایل صوتی ناتمام ماند.');
+    }
+    const deadline = Date.now() + FILE_ACTIVE_TIMEOUT_MS;
+    let current: GeminiFile;
+    while (Date.now() < deadline) {
+      current = await ai.files.get({ name: file.name });
+      if (current.state === 'ACTIVE' || current.state === undefined) {
+        if (current.uri) return { uri: current.uri };
+      }
+      if (current.state === 'FAILED') {
+        throw new GeminiGatewayError(
+          'GEMINI_API_ERROR',
+          'پردازش فایل صوتی توسط Gemini با خطا مواجه شد.',
+          { cause: current.error?.message },
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, FILE_ACTIVE_POLL_MS));
+    }
+    throw new GeminiGatewayError(
+      'GEMINI_API_ERROR',
+      'انتظار برای آماده‌شدن فایل صوتی در Gemini طولانی شد.',
+    );
+  }
+
+  async listModels(apiKey: string): Promise<GeminiModelInfo[]> {
+    const ai = new GoogleGenAI({ apiKey });
+    try {
+      const pager = await ai.models.list({ config: { pageSize: 100 } });
+      const models: GeminiModelInfo[] = [];
+      for await (const model of pager) {
+        const id = stripModelsPrefix(model.name ?? '');
+        if (!id) continue;
+        const capabilities = detectCapabilities({
+          id,
+          supportedActions: model.supportedActions,
+        });
+        // Only expose models with at least one usable capability.
+        if (!capabilities.generative && !capabilities.embedding && !capabilities.audio) {
+          continue;
+        }
+        models.push({
+          id,
+          displayName: model.displayName ?? id,
+          description: model.description ?? '',
+          capabilities,
+        });
+      }
+      return models;
+    } catch (error) {
+      throw toGeminiGatewayError(error);
+    }
+  }
+
+  /**
+   * Structured knowledge analysis of a transcript. Uses the official JSON
+   * schema support (responseJsonSchema) so the output is always structured;
+   * the raw text is then validated again with the shared Zod contract before
+   * any database write happens.
+   */
+  async analyzeKnowledge(input: {
+    apiKey: string;
+    modelId: string;
+    systemPrompt: string;
+    transcriptText: string;
+  }): Promise<{ analysis: KnowledgeAnalysis; usage: GeminiUsage; durationMs: number }> {
+    const ai = new GoogleGenAI({ apiKey: input.apiKey });
+    const started = Date.now();
+    try {
+      const response = await ai.models.generateContent({
+        model: input.modelId,
+        contents: [{ role: 'user', parts: [{ text: input.transcriptText }] }],
+        config: {
+          systemInstruction: { role: 'system', parts: [{ text: input.systemPrompt }] },
+          responseJsonSchema: {
+            type: 'object',
+            properties: {
+              destinations: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string' },
+                    type: { type: 'string', enum: ['CITY', 'COUNTRY', 'REGION', 'OTHER'] },
+                    confidence: { type: 'string', enum: ['CONFIRMED', 'PROVISIONAL', 'UNKNOWN'] },
+                    aliases: { type: 'array', items: { type: 'string' } },
+                  },
+                  required: ['name'],
+                },
+              },
+              knowledge: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    destination_reference: { type: 'string' },
+                    knowledge_type: {
+                      type: 'string',
+                      enum: [
+                        'FACT',
+                        'CUSTOMER_QUESTION',
+                        'CUSTOMER_OBJECTION',
+                        'CUSTOMER_NEED',
+                        'SALES_INSIGHT',
+                        'RECOMMENDATION',
+                        'OTHER',
+                      ],
+                    },
+                    category: { type: 'string' },
+                    entity_type: { type: 'string' },
+                    entity_name: { type: 'string' },
+                    attribute: { type: 'string' },
+                    value: { type: 'string' },
+                    unit: { type: 'string' },
+                    qualifiers: { type: 'array', items: { type: 'string' } },
+                    canonical_text: { type: 'string' },
+                    source_segment_ids: { type: 'array', items: { type: 'integer' } },
+                    confidence: { type: 'number' },
+                  },
+                  required: ['canonical_text', 'knowledge_type'],
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const raw = response.text ?? '';
+      if (raw.trim().length === 0) {
+        throw new GeminiGatewayError('GEMINI_API_ERROR', 'تحلیل دانش خروجی خالی برگرداند.', {
+          durationMs: Date.now() - started,
+        });
+      }
+      const jsonStart = raw.indexOf('{');
+      const jsonEnd = raw.lastIndexOf('}');
+      const json = jsonStart >= 0 && jsonEnd > jsonStart ? raw.slice(jsonStart, jsonEnd + 1) : raw;
+      const parsed = JSON.parse(json) as unknown;
+      const result = knowledgeAnalysisSchema.safeParse(parsed);
+      if (!result.success) {
+        throw new GeminiGatewayError('GEMINI_API_ERROR', 'خروجی ساخت‌یافته تحلیل دانش نامعتبر بود.', {
+          cause: result.error.message,
+          durationMs: Date.now() - started,
+        });
+      }
+
+      return {
+        analysis: result.data,
+        usage: normalizeUsage(response.usageMetadata),
+        durationMs: Date.now() - started,
+      };
+    } catch (error) {
+      if (error instanceof GeminiGatewayError) throw error;
+      const normalized = toGeminiGatewayError(error);
+      throw new GeminiGatewayError(normalized.code as GeminiErrorCode, normalized.message, {
+        cause: normalized.cause,
+        retryable: normalized.retryable,
+        durationMs: Date.now() - started,
+      });
+    }
+  }
+}
+
+export const geminiGateway = new GeminiGateway();
+
+/** Public surface used by the worker and by test doubles. */
+export type GeminiGatewayLike = Pick<
+  GeminiGateway,
+  'testConnection' | 'listModels' | 'transcribeAudio' | 'analyzeKnowledge'
+>;

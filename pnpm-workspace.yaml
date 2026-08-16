@@ -1,0 +1,11 @@
+packages:
+  - apps/*
+  - packages/*
+
+# pnpm 11 blocks dependency build scripts by default (supply-chain hardening).
+# esbuild needs its postinstall for its binary (Vite/tsx); @google/genai and
+# protobufjs run their own setup scripts.
+allowBuilds:
+  '@google/genai': true
+  esbuild: true
+  protobufjs: true

@@ -1,0 +1,545 @@
+/**
+ * Shared contracts between `@freebuff/web` and `@freebuff/server`.
+ *
+ * Contains the shared Zod schema for validation plus plain types. Type-only
+ * imports stay free of runtime code; value imports (e.g. `appSettingsSchema`)
+ * bundle the schema so both ends validate identically.
+ */
+import { z } from 'zod';
+
+/** Health status of the backend as a whole. */
+export type BackendStatus = 'ok' | 'degraded';
+
+/** Health status of the SQLite database. */
+export interface DatabaseHealth {
+  status: 'connected' | 'unavailable';
+}
+
+/** Response of `GET /api/health`. */
+export interface HealthResponse {
+  status: BackendStatus;
+  database: DatabaseHealth;
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+/** Shared Zod schema for application settings. Used for validation on both ends. */
+export const appSettingsSchema = z.object({
+  workspacePath: z.string().min(1, 'مسیر Workspace نمی‌تواند خالی باشد.'),
+  processingConcurrency: z
+    .number()
+    .int('تعداد پردازش همزمان باید عدد صحیح باشد.')
+    .min(1, 'تعداد پردازش همزمان باید حداقل ۱ باشد.')
+    .max(10, 'تعداد پردازش همزمان باید حداکثر ۱۰ باشد.'),
+});
+
+export type AppSettings = z.infer<typeof appSettingsSchema>;
+
+// ---------------------------------------------------------------------------
+// Error codes
+// ---------------------------------------------------------------------------
+
+export const settingsErrorCodes = [
+  'SETTINGS_VALIDATION_ERROR',
+  'WORKSPACE_PATH_INVALID',
+  'DATABASE_ERROR',
+] as const;
+
+export type SettingsErrorCode = (typeof settingsErrorCodes)[number];
+
+export const geminiErrorCodes = [
+  'GEMINI_NOT_CONFIGURED',
+  'GEMINI_AUTH_ERROR',
+  'GEMINI_NETWORK_ERROR',
+  'GEMINI_RATE_LIMIT',
+  'GEMINI_API_ERROR',
+] as const;
+
+export type GeminiErrorCode = (typeof geminiErrorCodes)[number];
+
+export const batchErrorCodes = [
+  'AUDIO_FILE_NOT_FOUND',
+  'AUDIO_FILE_READ_ERROR',
+  'AUDIO_FORMAT_UNSUPPORTED',
+  'AUDIO_HASH_ERROR',
+  'BATCH_SCAN_ERROR',
+  'JOB_CREATION_ERROR',
+  'BATCH_NOT_FOUND',
+  'BATCH_NOT_STARTABLE',
+] as const;
+
+export type BatchErrorCode = (typeof batchErrorCodes)[number];
+
+export const transcriptionErrorCodes = [
+  'TRANSCRIPTION_MODEL_NOT_CONFIGURED',
+  'TRANSCRIPTION_PROMPT_NOT_CONFIGURED',
+  'AUDIO_READ_ERROR',
+  'TRANSCRIPTION_FAILED',
+  'TRANSCRIPTION_EMPTY_RESPONSE',
+  'TRANSCRIPT_SAVE_FAILED',
+] as const;
+
+export type TranscriptionErrorCode = (typeof transcriptionErrorCodes)[number];
+
+export const knowledgeErrorCodes = [
+  'KNOWLEDGE_MODEL_NOT_CONFIGURED',
+  'KNOWLEDGE_PROMPT_NOT_CONFIGURED',
+  'KNOWLEDGE_ANALYSIS_FAILED',
+  'KNOWLEDGE_INVALID_OUTPUT',
+  'KNOWLEDGE_INVALID_SEGMENT',
+  'KNOWLEDGE_SAVE_FAILED',
+  'TRANSCRIPT_NOT_FOUND',
+] as const;
+
+export type KnowledgeErrorCode = (typeof knowledgeErrorCodes)[number];
+
+export const apiErrorCodes = [
+  ...settingsErrorCodes,
+  ...geminiErrorCodes,
+  'MODEL_CONFIG_INVALID',
+  'PROMPT_NOT_FOUND',
+  'PROMPT_INVALID',
+  ...batchErrorCodes,
+  ...transcriptionErrorCodes,
+  ...knowledgeErrorCodes,
+] as const;
+
+export type ApiErrorCode = (typeof apiErrorCodes)[number];
+
+/** Error payload returned by API endpoints on failure. */
+export interface ApiErrorResponse {
+  error: {
+    code: ApiErrorCode;
+    message: string;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Gemini credentials
+// ---------------------------------------------------------------------------
+
+export const geminiCredentialStatuses = ['NOT_CONFIGURED', 'CONFIGURED', 'INVALID'] as const;
+export type GeminiCredentialStatus = (typeof geminiCredentialStatuses)[number];
+
+export const geminiTestOutcomes = [
+  'success',
+  'auth_error',
+  'network_error',
+  'rate_limit',
+  'api_error',
+] as const;
+export type GeminiTestOutcome = (typeof geminiTestOutcomes)[number];
+
+export const geminiApiKeyInputSchema = z.object({
+  apiKey: z.string().trim().min(1, 'API Key نمی‌تواند خالی باشد.'),
+});
+
+export type GeminiApiKeyInput = z.infer<typeof geminiApiKeyInputSchema>;
+
+export interface GeminiCredentialStatusResponse {
+  status: GeminiCredentialStatus;
+  lastTestedAt: string | null;
+  lastTestOutcome: GeminiTestOutcome | null;
+}
+
+export interface GeminiTestConnectionResponse extends GeminiCredentialStatusResponse {
+  message: string;
+}
+
+// ---------------------------------------------------------------------------
+// Gemini models
+// ---------------------------------------------------------------------------
+
+export interface GeminiModelCapabilities {
+  generative: boolean;
+  embedding: boolean;
+  audio: boolean;
+}
+
+export interface GeminiModelInfo {
+  id: string;
+  displayName: string;
+  description: string;
+  capabilities: GeminiModelCapabilities;
+}
+
+export interface GeminiModelsResponse {
+  models: GeminiModelInfo[];
+  refreshedAt: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Model configuration
+// ---------------------------------------------------------------------------
+
+export const modelStages = [
+  'TRANSCRIPTION',
+  'KNOWLEDGE_PROCESSING',
+  'CONTENT_GENERATION',
+  'EMBEDDING',
+] as const;
+
+export type ModelStage = (typeof modelStages)[number];
+
+export const modelProviders = ['GEMINI'] as const;
+export type ModelProvider = (typeof modelProviders)[number];
+
+export const modelConfigSchema = z.object({
+  stage: z.enum(modelStages, { message: 'Stage نامعتبر است.' }),
+  modelId: z.string().trim().min(1, 'مدل انتخاب نشده است.'),
+});
+
+export type ModelConfigInput = z.infer<typeof modelConfigSchema>;
+
+export interface ModelConfigResponse {
+  stage: ModelStage;
+  provider: ModelProvider;
+  modelId: string;
+  /** Whether the model id is present in the latest discovery result. */
+  available: boolean;
+}
+
+export type ModelConfigsResponse = ModelConfigResponse[];
+
+// ---------------------------------------------------------------------------
+// Prompts
+// ---------------------------------------------------------------------------
+
+export const promptTypes = [
+  'TRANSCRIPTION',
+  'KNOWLEDGE_PROCESSING',
+  'CONTENT_GENERATION',
+] as const;
+
+export type PromptType = (typeof promptTypes)[number];
+
+/** Prompt content — may be empty, but empty content is never processing-ready. */
+export const promptContentSchema = z.object({
+  content: z.string(),
+});
+
+export type PromptContentInput = z.infer<typeof promptContentSchema>;
+
+export interface PromptVersionInfo {
+  id: number;
+  versionNumber: number;
+  content: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface PromptTemplateInfo {
+  promptType: PromptType;
+  displayName: string;
+  activeVersion: PromptVersionInfo | null;
+  versionCount: number;
+}
+
+export type PromptTemplatesResponse = PromptTemplateInfo[];
+
+export interface PromptVersionsResponse {
+  promptType: PromptType;
+  displayName: string;
+  versions: PromptVersionInfo[];
+}
+
+// ---------------------------------------------------------------------------
+// AI configuration readiness
+// ---------------------------------------------------------------------------
+
+export interface AiReadinessCheck {
+  key: string;
+  ready: boolean;
+}
+
+export interface AiReadinessResponse {
+  ready: boolean;
+  checks: AiReadinessCheck[];
+}
+
+// ---------------------------------------------------------------------------
+// Batches / audio ingestion / jobs
+// ---------------------------------------------------------------------------
+
+export const batchStatuses = [
+  'CREATED',
+  'SCANNING',
+  'READY',
+  'PROCESSING',
+  'TRANSCRIBING',
+  'ANALYZING',
+  'ANALYSIS_COMPLETED',
+  'COMPLETED',
+  'PARTIAL_FAILED',
+  'FAILED',
+  'CANCELLED',
+] as const;
+
+export type BatchStatus = (typeof batchStatuses)[number];
+
+export const audioStatuses = [
+  'DISCOVERED',
+  'REGISTERED',
+  'DUPLICATE',
+  'QUEUED',
+  'TRANSCRIBING',
+  'TRANSCRIBED',
+  'FAILED',
+] as const;
+
+export type AudioStatus = (typeof audioStatuses)[number];
+
+export const jobStatuses = ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED'] as const;
+export type JobStatus = (typeof jobStatuses)[number];
+
+export const jobTypes = ['TRANSCRIPTION', 'KNOWLEDGE_ANALYSIS'] as const;
+export type JobType = (typeof jobTypes)[number];
+
+/** Extensions accepted for audio ingestion. */
+export const SUPPORTED_AUDIO_EXTENSIONS = [
+  '.mp3',
+  '.wav',
+  '.m4a',
+  '.aac',
+  '.ogg',
+  '.flac',
+  '.webm',
+] as const;
+
+export interface BatchStats {
+  totalAudio: number;
+  newAudio: number;
+  duplicates: number;
+  queuedJobs: number;
+  transcribing: number;
+  transcribed: number;
+  failedItems: number;
+  /** Knowledge analysis jobs waiting or running. */
+  knowledgePending: number;
+  knowledgeAnalyzing: number;
+  /** Transcripts that finished knowledge analysis. */
+  knowledgeAnalyzed: number;
+  /** Distinct destinations detected in this batch. */
+  detectedDestinations: number;
+  /** Total extracted knowledge items from this batch. */
+  extractedKnowledge: number;
+}
+
+export interface BatchSummary {
+  id: number;
+  status: BatchStatus;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  stats: BatchStats;
+}
+
+export type BatchListResponse = BatchSummary[];
+
+/** Audio file as exposed to the UI — the local absolute path never leaves the server. */
+export interface AudioFileInfo {
+  id: number;
+  originalName: string;
+  size: number;
+  status: AudioStatus;
+  duplicateOfAudioId: number | null;
+  createdAt: string;
+  /** Current attempt count of the audio's transcription job (0 when none). */
+  attempt: number;
+  jobStatus: JobStatus | null;
+  /** Whether a completed transcript exists for this audio. */
+  hasTranscript: boolean;
+}
+
+export interface BatchDetailResponse extends BatchSummary {
+  audio: AudioFileInfo[];
+}
+
+export interface ScanResult {
+  discoveredFiles: number;
+  newAudio: number;
+  duplicates: number;
+  unsupported: number;
+  queuedJobs: number;
+}
+
+// ---------------------------------------------------------------------------
+// Transcripts
+// ---------------------------------------------------------------------------
+
+export const transcriptStatuses = ['COMPLETED', 'FAILED'] as const;
+export type TranscriptStatus = (typeof transcriptStatuses)[number];
+
+export const apiUsageStages = ['TRANSCRIPTION', 'KNOWLEDGE'] as const;
+export type ApiUsageStage = (typeof apiUsageStages)[number];
+
+export const apiUsageStatuses = ['SUCCESS', 'FAILED'] as const;
+export type ApiUsageStatus = (typeof apiUsageStatuses)[number];
+
+/** Normalized Gemini usage metadata. Unknown values stay null — never estimated. */
+export interface GeminiUsage {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedTokens: number | null;
+  totalTokens: number | null;
+}
+
+export interface TranscriptSegmentInfo {
+  id: number;
+  sequence: number;
+  speaker: string | null;
+  text: string;
+  normalizedText: string;
+  startTime: number | null;
+  endTime: number | null;
+}
+
+export interface TranscriptInfo {
+  id: number;
+  audioId: number;
+  fullText: string;
+  normalizedText: string;
+  normalizedHash: string;
+  language: string | null;
+  modelId: string;
+  promptVersionId: number;
+  status: TranscriptStatus;
+  duplicateOfTranscriptId: number | null;
+  createdAt: string;
+}
+
+export interface TranscriptResponse {
+  audioId: number;
+  audioName: string;
+  transcript: TranscriptInfo;
+  segments: TranscriptSegmentInfo[];
+}
+
+// ---------------------------------------------------------------------------
+// Destinations & knowledge (Phase 8)
+// ---------------------------------------------------------------------------
+
+export const destinationTypes = ['CITY', 'COUNTRY', 'REGION', 'OTHER'] as const;
+export type DestinationType = (typeof destinationTypes)[number];
+
+export const destinationStatuses = ['PROVISIONAL', 'CONFIRMED', 'MERGED'] as const;
+export type DestinationStatus = (typeof destinationStatuses)[number];
+
+/** Gemini's confidence signal for a detected destination. */
+export const destinationConfidenceLevels = ['CONFIRMED', 'PROVISIONAL', 'UNKNOWN'] as const;
+export type DestinationConfidence = (typeof destinationConfidenceLevels)[number];
+
+export const knowledgeTypes = [
+  'FACT',
+  'CUSTOMER_QUESTION',
+  'CUSTOMER_OBJECTION',
+  'CUSTOMER_NEED',
+  'SALES_INSIGHT',
+  'RECOMMENDATION',
+  'OTHER',
+] as const;
+export type KnowledgeType = (typeof knowledgeTypes)[number];
+
+export const knowledgeStatuses = ['ACTIVE', 'PROVISIONAL', 'ARCHIVED'] as const;
+export type KnowledgeStatus = (typeof knowledgeStatuses)[number];
+
+/** Structured analysis output Gemini returns (also used for validation). */
+export const knowledgeAnalysisSchema = z.object({
+  destinations: z
+    .array(
+      z.object({
+        name: z.string().min(1),
+        type: z.enum(destinationTypes, { message: 'نوع مقصد نامعتبر است.' }).default('OTHER'),
+        confidence: z.enum(destinationConfidenceLevels).default('PROVISIONAL'),
+        aliases: z.array(z.string()).default([]),
+      }),
+    )
+    .default([]),
+  knowledge: z
+    .array(
+      z.object({
+        destinationReference: z.string().nullable().default(null),
+        knowledgeType: z.enum(knowledgeTypes, { message: 'نوع دانش نامعتبر است.' }).default('OTHER'),
+        category: z.string().nullable().default(null),
+        entityType: z.string().nullable().default(null),
+        entityName: z.string().nullable().default(null),
+        attribute: z.string().nullable().default(null),
+        value: z.string().nullable().default(null),
+        unit: z.string().nullable().default(null),
+        qualifiers: z.array(z.string()).default([]),
+        canonicalText: z.string().min(1, 'متن دانش نمی‌تواند خالی باشد.'),
+        sourceSegmentIds: z.array(z.number().int().positive()).default([]),
+        confidence: z.number().min(0).max(1).default(0.5),
+      }),
+    )
+    .default([]),
+});
+
+export type KnowledgeAnalysis = z.infer<typeof knowledgeAnalysisSchema>;
+
+export interface DestinationSummary {
+  id: number;
+  canonicalName: string;
+  type: DestinationType;
+  status: DestinationStatus;
+  aliases: string[];
+  knowledgeCount: number;
+  sourceTranscriptCount: number;
+  firstSeenBatchId: number | null;
+  createdAt: string;
+}
+
+export type DestinationListResponse = DestinationSummary[];
+
+export interface KnowledgeSummary {
+  id: number;
+  destinationId: number | null;
+  knowledgeType: KnowledgeType;
+  category: string | null;
+  entityType: string | null;
+  entityName: string | null;
+  attribute: string | null;
+  currentValue: string | null;
+  unit: string | null;
+  status: KnowledgeStatus;
+  confidence: number;
+  canonicalText: string;
+  sourceCount: number;
+  createdAt: string;
+}
+
+export interface DestinationDetailResponse extends DestinationSummary {
+  knowledge: KnowledgeSummary[];
+  sources: {
+    transcriptId: number;
+    audioId: number;
+    audioName: string;
+    batchId: number;
+    analyzedAt: string;
+  }[];
+}
+
+/** Knowledge attached to a transcript, for the transcript viewer. */
+export interface TranscriptKnowledgeInfo {
+  destinations: {
+    id: number;
+    canonicalName: string;
+    type: DestinationType;
+    confidence: number;
+  }[];
+  knowledge: {
+    id: number;
+    knowledgeType: KnowledgeType;
+    entityType: string | null;
+    entityName: string | null;
+    attribute: string | null;
+    currentValue: string | null;
+    unit: string | null;
+    status: KnowledgeStatus;
+    canonicalText: string;
+  }[];
+}
+
