@@ -1,23 +1,84 @@
-import { CheckCircle2, RefreshCw, TriangleAlert } from 'lucide-react';
+import { CheckCircle2, ChevronDown, RefreshCw, TriangleAlert } from 'lucide-react';
 import type { ModelStage } from '@freebuff/contracts';
-import { modelStages } from '@freebuff/contracts';
 import { ErrorState } from '../../components/ErrorState';
 import { LoadingState } from '../../components/LoadingState';
 import { StatusBadge, type StatusTone } from '../../components/StatusBadge';
 import { useModels } from './useModels';
 
 const STAGE_LABELS: Record<ModelStage, string> = {
-  TRANSCRIPTION: 'مدل تبدیل صوت به متن',
-  KNOWLEDGE_PROCESSING: 'مدل پردازش دانش',
-  CONTENT_GENERATION: 'مدل تولید محتوا',
+  TRANSCRIPTION: 'مدل تبدیل ویس به متن',
+  KNOWLEDGE_PROCESSING: 'مدل پردازش و استخراج نکات',
+  CONTENT_GENERATION: 'مدل تولید محتوا (Legacy)',
   EMBEDDING: 'مدل Embedding',
 };
+
+/** Main workflow models — always visible. */
+const MAIN_STAGES: ModelStage[] = ['TRANSCRIPTION', 'KNOWLEDGE_PROCESSING'];
+/** Secondary/advanced models — collapsed by default. */
+const ADVANCED_STAGES: ModelStage[] = ['EMBEDDING'];
 
 const SELECT_CLASSES =
   'w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-text-primary transition-colors hover:border-border-strong focus:border-accent';
 
 const BUTTON_CLASSES =
   'inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50';
+
+interface StageCardProps {
+  stage: ModelStage;
+  hasModels: boolean;
+  saving: boolean;
+  selectedId: string;
+  unavailable: boolean;
+  onSelect: (stage: ModelStage, modelId: string) => void;
+  models: { id: string; displayName: string }[];
+}
+
+function StageCard({ stage, hasModels, saving, selectedId, unavailable, onSelect, models }: StageCardProps) {
+  let tone: StatusTone = 'neutral';
+  let statusLabel = 'انتخاب نشده';
+  if (selectedId !== '') {
+    if (unavailable) {
+      tone = 'danger';
+      statusLabel = 'نامعتبر';
+    } else {
+      tone = 'success';
+      statusLabel = 'انتخاب شده';
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-border p-4">
+      <div className="flex items-center justify-between gap-2">
+        <label htmlFor={`model-${stage}`} className="text-sm font-medium text-text-primary">
+          {STAGE_LABELS[stage]}
+        </label>
+        <StatusBadge tone={tone} label={statusLabel} />
+      </div>
+      <select
+        id={`model-${stage}`}
+        dir="ltr"
+        disabled={!hasModels || saving}
+        value={selectedId}
+        onChange={(event) => onSelect(stage, event.target.value)}
+        className={`${SELECT_CLASSES} font-mono`}
+      >
+        <option value="">{hasModels ? '— انتخاب مدل —' : '—'}</option>
+        {models.map((model) => (
+          <option key={model.id} value={model.id}>
+            {model.displayName} ({model.id})
+          </option>
+        ))}
+      </select>
+      {unavailable && (
+        <p className="flex items-center gap-1.5 text-xs text-danger">
+          <TriangleAlert className="size-3.5" aria-hidden="true" />
+          مدل انتخاب‌شده دیگر در دسترس نیست؛ مدل دیگری انتخاب کنید.
+        </p>
+      )}
+      {saving && <p className="text-xs text-text-secondary">در حال ذخیره…</p>}
+    </div>
+  );
+}
 
 export function ModelsSection() {
   const {
@@ -55,6 +116,19 @@ export function ModelsSection() {
   }
 
   const hasModels = models.length > 0;
+  const cardProps = (stage: ModelStage) => {
+    const config = configs.find((c) => c.stage === stage);
+    const selectedId = config?.modelId ?? '';
+    const unavailable = config ? !config.available && selectedId !== '' : false;
+    return {
+      hasModels,
+      saving: savingStage === stage,
+      selectedId,
+      unavailable,
+      onSelect: (s: ModelStage, modelId: string) => void selectModel(s, modelId),
+      models: modelsForStage(stage),
+    };
+  };
 
   return (
     <div className="space-y-5">
@@ -90,58 +164,22 @@ export function ModelsSection() {
       )}
 
       <div className="grid gap-4 sm:grid-cols-2">
-        {modelStages.map((stage) => {
-          const config = configs.find((c) => c.stage === stage);
-          const selectedId = config?.modelId ?? '';
-          const unavailable = config ? !config.available && selectedId !== '' : false;
-          const saving = savingStage === stage;
-
-          let tone: StatusTone = 'neutral';
-          let statusLabel = 'انتخاب نشده';
-          if (selectedId !== '') {
-            if (unavailable) {
-              tone = 'danger';
-              statusLabel = 'Unavailable';
-            } else {
-              tone = 'success';
-              statusLabel = 'انتخاب شده';
-            }
-          }
-
-          return (
-            <div key={stage} className="space-y-2 rounded-md border border-border p-4">
-              <div className="flex items-center justify-between gap-2">
-                <label htmlFor={`model-${stage}`} className="text-sm font-medium text-text-primary">
-                  {STAGE_LABELS[stage]}
-                </label>
-                <StatusBadge tone={tone} label={statusLabel} />
-              </div>
-              <select
-                id={`model-${stage}`}
-                dir="ltr"
-                disabled={!hasModels || saving}
-                value={selectedId}
-                onChange={(event) => void selectModel(stage, event.target.value)}
-                className={`${SELECT_CLASSES} font-mono`}
-              >
-                <option value="">{hasModels ? '— انتخاب مدل —' : '—'}</option>
-                {modelsForStage(stage).map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.displayName} ({model.id})
-                  </option>
-                ))}
-              </select>
-              {unavailable && (
-                <p className="flex items-center gap-1.5 text-xs text-danger">
-                  <TriangleAlert className="size-3.5" aria-hidden="true" />
-                  مدل انتخاب‌شده دیگر در دسترس نیست؛ مدل دیگری انتخاب کنید.
-                </p>
-              )}
-              {saving && <p className="text-xs text-text-secondary">در حال ذخیره…</p>}
-            </div>
-          );
-        })}
+        {MAIN_STAGES.map((stage) => (
+          <StageCard key={stage} stage={stage} {...cardProps(stage)} />
+        ))}
       </div>
+
+      <details className="group rounded-md border border-border">
+        <summary className="flex cursor-pointer list-none items-center gap-1.5 px-4 py-2.5 text-sm font-medium text-text-secondary transition-colors hover:text-text-primary">
+          <ChevronDown className="size-4 transition-transform group-open:rotate-180" aria-hidden="true" />
+          پیشرفته
+        </summary>
+        <div className="grid gap-4 border-t border-border p-4 sm:grid-cols-2">
+          {ADVANCED_STAGES.map((stage) => (
+            <StageCard key={stage} stage={stage} {...cardProps(stage)} />
+          ))}
+        </div>
+      </details>
 
       {saveState === 'saved' && (
         <p className="flex items-center gap-1.5 text-sm text-success" role="status">

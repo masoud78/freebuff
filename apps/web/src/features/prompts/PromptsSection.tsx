@@ -7,6 +7,12 @@ import { LoadingState } from '../../components/LoadingState';
 import { StatusBadge } from '../../components/StatusBadge';
 import { usePrompts } from './usePrompts';
 
+const PROMPT_LABELS: Record<PromptType, string> = {
+  TRANSCRIPTION: 'پرامپت تبدیل ویس به متن',
+  KNOWLEDGE_PROCESSING: 'پرامپت پردازش و استخراج نکات',
+  CONTENT_GENERATION: 'پرامپت تولید محتوا (Legacy)',
+};
+
 const TEXTAREA_CLASSES =
   'w-full rounded-md border border-border bg-surface px-3 py-2.5 text-sm leading-relaxed text-text-primary placeholder:text-text-muted transition-colors hover:border-border-strong focus:border-accent';
 
@@ -53,7 +59,7 @@ export function PromptsSection() {
           <div key={promptType} className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold text-text-primary">{templates[promptType]}</h3>
+                <h3 className="text-sm font-semibold text-text-primary">{PROMPT_LABELS[promptType]}</h3>
                 <StatusBadge
                   tone={isConfigured ? 'success' : 'warning'}
                   label={isConfigured ? 'پیکربندی شده' : 'Missing'}
@@ -82,7 +88,7 @@ export function PromptsSection() {
             </div>
 
             <textarea
-              aria-label={`متن ${templates[promptType]}`}
+              aria-label={`متن ${PROMPT_LABELS[promptType]}`}
               dir="rtl"
               rows={7}
               placeholder="متن پرامپت را اینجا وارد کنید…"

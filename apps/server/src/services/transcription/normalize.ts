@@ -34,7 +34,7 @@ export interface TranscriptSegmentDraft {
  * for segmentation to succeed.
  */
 const SPEAKER_LABEL_RE =
-  /^(?:[0-9٠-٩۰-۹]{1,3}|(?:Speaker|گوینده|گفتگوگر|شخص|نفر|صدای)[\s_]*(?:[0-9٠-٩۰-۹]{0,3}))\s*[:：]\s+/i;
+  /^(?:[0-9٠-٩۰-۹]{1,3}|(?:Speaker|گوینده|گفتگوگر|شخص|نفر|صدای|فروشنده|مشتری)[\s_]*(?:[0-9٠-٩۰-۹]{0,3}))\s*[:：]\s+/i;
 
 /**
  * Deterministic local segmentation: paragraphs first, then best-effort

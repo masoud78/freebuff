@@ -6,9 +6,156 @@ import type {
   GeminiModelInfo,
   GeminiUsage,
   KnowledgeAnalysis,
+  NoteExtraction,
 } from '@freebuff/contracts';
+import { z } from 'zod';
 import { DomainError } from '../errors.js';
-import { deltaClassificationSchema, knowledgeAnalysisSchema } from '@freebuff/contracts';
+import { deltaClassificationSchema, knowledgeAnalysisSchema, noteExtractionSchema } from '@freebuff/contracts';
+import { NEWSROOM_REPORTER_PROMPT } from '../newsroom-prompt.js';
+
+/** Internal contract for one ambiguous note comparison (notes vs notes). */
+export const noteComparisonSchema = z.object({
+  decision: z.enum(['ADD', 'UPDATE', 'MARK_OUTDATED', 'NO_CHANGE']),
+  matchedNoteId: z.number().int().min(0).default(0),
+  logReason: z.string().default(''),
+});
+
+export type NoteComparison = z.infer<typeof noteComparisonSchema>;
+
+export interface NoteComparisonPayload {
+  candidate: { title: string; description: string; relevantDate: string | null };
+  destination: string | null;
+  existingNotes: { id: number; title: string; description: string; relevantDate: string | null }[];
+}
+
+/** The note-comparison contract appended to the user's knowledge prompt. */
+export const NOTE_COMPARISON_INTERNAL_CONTRACT = `
+--- Internal note comparison contract (system, non-negotiable) ---
+You are comparing ONE extracted note against a small set of EXISTING notes of
+the same destination. Only notes listed under "existingNotes" may be
+referenced by matchedNoteId.
+
+Decide exactly one:
+- ADD: a genuinely new, useful note with no existing equivalent.
+- UPDATE: the same topic already exists but the new note is newer, more
+  accurate or more complete. A new version should replace it.
+- MARK_OUTDATED: the new information reliably shows an existing note is no
+  longer valid (superseded, expired, or contradicted) AND there is no
+  replacement to store. Only use this when the evidence is clear; otherwise
+  prefer NO_CHANGE.
+- NO_CHANGE: the new note only repeats existing knowledge — store nothing new.
+
+The logReason must be a short, human, grounded Persian sentence that cites
+what actually changed (only facts present in the candidate or the existing
+note). Never mention scores, similarity, embeddings or that "AI decided".
+For NO_CHANGE the logReason may be empty.
+
+Return JSON only:
+{"decision":"ADD|UPDATE|MARK_OUTDATED|NO_CHANGE","matchedNoteId":<id from the list, or 0 for ADD>,"logReason":"<short grounded Persian reason>"}
+`;
+
+/** Quality gate appended to the extraction contract. */
+export const NOTE_EXTRACTION_INTERNAL_CONTRACT = `
+--- Internal note extraction contract (system, non-negotiable) ---
+Extract ONLY useful, actionable, decision-relevant, customer-relevant or
+content-worthy information. Do NOT extract greetings, small talk, obvious or
+repeated statements, irrelevant personal details, or trivial facts. Quality
+over quantity: a few genuinely useful notes beat many weak ones. For every
+note, before output ask: will this meaningfully help a future decision,
+answer, sale or destination understanding? If not, omit it.
+
+Every note must have a kind:
+- TOUR_INFO: operational facts about a tour/product of the destination
+  (hotels, stay length, transport, flights, trains, transfers, package terms,
+  schedule changes, tour limits, practical pros/cons, package comparisons).
+- DESTINATION_INFO: facts about the destination itself (areas, access, hotel
+  locations, transport, practical travel conditions, key features, limits,
+  accommodation notes).
+- TRAVELER_GUIDANCE: practical decision guidance the seller gave (e.g. "if
+  proximity to the shrine matters, the entrance matters more than raw
+  distance"). Only when the conversation genuinely supports the reasoning.
+
+Each description must be COMPLETE and self-contained: explain the knowledge,
+keep the necessary context, mention the practical effect/condition when
+present, and be understandable without reading the transcript. Do not
+abbreviate, truncate or summarize the note into a short snippet. Never invent
+facts to complete it.
+
+For each factual note set scopeType:
+- TOUR when the note is about a specific tour (and set tourSubject to a short
+  searchable label, e.g. «تور آنتالیا از تبریز»).
+- DESTINATION otherwise.
+
+For each note set the destination to the place the information is ABOUT (the
+travel destination or subject of the information) and set its role:
+- DESTINATION: the place the note is about.
+- ORIGIN: only where the traveler comes from — never create a destination for it.
+- TRANSIT / COMPARISON / OTHER: contextual only.
+
+Separately, extract audienceInsights (inferred traveler concerns — NOT facts):
+- An insight is a grounded inference about what the traveler cares about (a
+  repeated question, returning to a topic, comparing options on one criterion,
+  asking for reassurance, the real reason a choice was rejected).
+- Each insight needs an inferenceBasis: a short, concrete explanation of what
+  in the conversation supports it.
+- Never turn an inference into a fact about the destination. E.g. a traveler
+  asking repeatedly about cleanliness is an insight about the traveler, never
+  "the hotels are unclean".
+- Use language scoped to the call ("در این تماس…"), never "مشتریان معمولاً…".
+- A single weak signal is not enough for an insight; omit it.
+- Optionally attach ONE contentOpportunity {title, reason} derived from the
+  actual concern. Never invent generic topics.
+
+Also return a conversationTopic: a very short phrase (a few words) naming the
+main topic of the call (e.g. «بررسی هتل‌های نزدیک حرم در مشهد»), never a long
+summary.
+
+Return JSON only (camelCase keys):
+{"conversationTopic":"<short topic phrase>","voiceReport":"<short Persian summary of the whole conversation>","notes":[{"title":"...","description":"...","destination":{"name":"...","role":"DESTINATION|ORIGIN|TRANSIT|COMPARISON|OTHER"},"relevantDate":null,"kind":"TOUR_INFO|DESTINATION_INFO|TRAVELER_GUIDANCE","scopeType":"DESTINATION|TOUR","tourSubject":null}],"audienceInsights":[{"title":"...","description":"...","destination":{"name":"...","role":"DESTINATION"},"inferenceBasis":"...","confidence":0.0,"contentOpportunity":{"title":"...","reason":"..."}}]}
+`;
+
+/** One structured editorial story produced by the reporter. */
+export interface NewsroomStory {
+  headline: string;
+  paragraphs: string[];
+}
+
+/** Shared Zod contract for the reporter's structured output. */
+export const newsroomStoriesSchema = z.object({
+  stories: z.array(
+    z.object({
+      headline: z.string().min(1, 'عنوان خبر نمی‌تواند خالی باشد.'),
+      paragraphs: z.array(z.string().min(1)).default([]),
+    }),
+  ).default([]),
+});
+
+export type NewsroomStories = z.infer<typeof newsroomStoriesSchema>;
+
+/**
+ * Structured input the backend builds for the reporter (one destination).
+ * Full detail of each changed item is supplied — never the whole database.
+ */
+export interface NewsroomPayload {
+  destination: string;
+  /** Real distinct source-voice count for this destination (grounded counts only). */
+  sourceVoiceCount: number;
+  newNotes: { title: string; description: string }[];
+  updatedNotes: {
+    title: string;
+    previousTitle: string;
+    previousDescription: string;
+    newDescription: string;
+  }[];
+  outdatedNotes: { title: string; previousDescription: string; reason: string }[];
+  newInsights: {
+    title: string;
+    description: string;
+    inferenceBasis: string;
+    contentOpportunityTitle: string | null;
+    contentOpportunityReason: string | null;
+  }[];
+}
 
 /**
  * Error thrown by the Gemini gateway. `code` is a stable, normalized
@@ -507,6 +654,188 @@ export class GeminiGateway {
   }
 
   /**
+   * One simplified processing call: a whole-voice report plus useful notes.
+   * Replaces the legacy entity/attribute knowledge extraction for the new
+   * product flow. Output is forced to the note schema and re-validated.
+   */
+  async analyzeNotes(input: {
+    apiKey: string;
+    modelId: string;
+    systemPrompt: string;
+    transcriptText: string;
+  }): Promise<{ analysis: NoteExtraction; usage: GeminiUsage; durationMs: number }> {
+    const ai = new GoogleGenAI({ apiKey: input.apiKey });
+    const started = Date.now();
+    try {
+      const response = await ai.models.generateContent({
+        model: input.modelId,
+        contents: [{ role: 'user', parts: [{ text: input.transcriptText }] }],
+        config: {
+          systemInstruction: {
+            role: 'system',
+            parts: [{ text: `${input.systemPrompt}\n${NOTE_EXTRACTION_INTERNAL_CONTRACT}` }],
+          },
+          responseJsonSchema: {
+            type: 'object',
+            properties: {
+              conversationTopic: { type: 'string' },
+              voiceReport: { type: 'string' },
+              notes: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    title: { type: 'string' },
+                    description: { type: 'string' },
+                    destination: {
+                      type: 'object',
+                      properties: {
+                        name: { type: 'string' },
+                        role: { type: 'string', enum: ['ORIGIN', 'DESTINATION', 'TRANSIT', 'COMPARISON', 'OTHER'] },
+                      },
+                      required: ['name'],
+                    },
+                    relevantDate: { type: ['string', 'null'] },
+                    kind: { type: 'string', enum: ['TOUR_INFO', 'DESTINATION_INFO', 'TRAVELER_GUIDANCE'] },
+                    scopeType: { type: 'string', enum: ['DESTINATION', 'TOUR'] },
+                    tourSubject: { type: ['string', 'null'] },
+                  },
+                  required: ['title', 'description', 'destination'],
+                },
+              },
+              audienceInsights: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    title: { type: 'string' },
+                    description: { type: 'string' },
+                    destination: {
+                      type: 'object',
+                      properties: {
+                        name: { type: 'string' },
+                        role: { type: 'string', enum: ['ORIGIN', 'DESTINATION', 'TRANSIT', 'COMPARISON', 'OTHER'] },
+                      },
+                      required: ['name'],
+                    },
+                    inferenceBasis: { type: 'string' },
+                    confidence: { type: 'number' },
+                    contentOpportunity: {
+                      type: ['object', 'null'],
+                      properties: {
+                        title: { type: 'string' },
+                        reason: { type: 'string' },
+                      },
+                      required: ['title', 'reason'],
+                    },
+                  },
+                  required: ['title', 'description', 'destination', 'inferenceBasis'],
+                },
+              },
+            },
+            required: ['voiceReport', 'notes'],
+          },
+        },
+      });
+
+      const raw = response.text ?? '';
+      if (raw.trim().length === 0) {
+        throw new GeminiGatewayError('GEMINI_API_ERROR', 'پردازش ویس خروجی خالی برگرداند.', {
+          durationMs: Date.now() - started,
+        });
+      }
+      const jsonStart = raw.indexOf('{');
+      const jsonEnd = raw.lastIndexOf('}');
+      const json = jsonStart >= 0 && jsonEnd > jsonStart ? raw.slice(jsonStart, jsonEnd + 1) : raw;
+      const parsed = JSON.parse(json) as unknown;
+      const result = noteExtractionSchema.safeParse(parsed);
+      if (!result.success) {
+        throw new GeminiGatewayError('GEMINI_API_ERROR', 'خروجی ساخت‌یافته پردازش ویس نامعتبر بود.', {
+          cause: result.error.message,
+          durationMs: Date.now() - started,
+        });
+      }
+
+      return {
+        analysis: result.data,
+        usage: normalizeUsage(response.usageMetadata),
+        durationMs: Date.now() - started,
+      };
+    } catch (error) {
+      if (error instanceof GeminiGatewayError) throw error;
+      const normalized = toGeminiGatewayError(error);
+      throw new GeminiGatewayError(normalized.code as GeminiErrorCode, normalized.message, {
+        cause: normalized.cause,
+        retryable: normalized.retryable,
+        durationMs: Date.now() - started,
+      });
+    }
+  }
+
+  /** One ambiguous note comparison (used only when deterministic gates fail). */
+  async compareNote(input: {
+    apiKey: string;
+    modelId: string;
+    systemPrompt: string;
+    payload: NoteComparisonPayload;
+  }): Promise<{ comparison: NoteComparison; usage: GeminiUsage; durationMs: number }> {
+    const ai = new GoogleGenAI({ apiKey: input.apiKey });
+    const started = Date.now();
+    try {
+      const response = await ai.models.generateContent({
+        model: input.modelId,
+        contents: [{ role: 'user', parts: [{ text: JSON.stringify(input.payload) }] }],
+        config: {
+          systemInstruction: {
+            role: 'system',
+            parts: [{ text: `${input.systemPrompt}\n${NOTE_COMPARISON_INTERNAL_CONTRACT}` }],
+          },
+          responseJsonSchema: {
+            type: 'object',
+            properties: {
+              decision: { type: 'string', enum: ['ADD', 'UPDATE', 'MARK_OUTDATED', 'NO_CHANGE'] },
+              matched_note_id: { type: 'integer' },
+              log_reason: { type: 'string' },
+            },
+            required: ['decision', 'matched_note_id', 'log_reason'],
+          },
+        },
+      });
+
+      const raw = response.text ?? '';
+      if (raw.trim().length === 0) {
+        throw new GeminiGatewayError('GEMINI_API_ERROR', 'مقایسه نکته خروجی خالی برگرداند.', {
+          durationMs: Date.now() - started,
+        });
+      }
+      const jsonStart = raw.indexOf('{');
+      const jsonEnd = raw.lastIndexOf('}');
+      const json = jsonStart >= 0 && jsonEnd > jsonStart ? raw.slice(jsonStart, jsonEnd + 1) : raw;
+      const parsed = JSON.parse(json) as unknown;
+      const result = noteComparisonSchema.safeParse(parsed);
+      if (!result.success) {
+        throw new GeminiGatewayError('GEMINI_API_ERROR', 'خروجی ساخت‌یافته مقایسه نکته نامعتبر بود.', {
+          cause: result.error.message,
+          durationMs: Date.now() - started,
+        });
+      }
+      return {
+        comparison: result.data,
+        usage: normalizeUsage(response.usageMetadata),
+        durationMs: Date.now() - started,
+      };
+    } catch (error) {
+      if (error instanceof GeminiGatewayError) throw error;
+      const normalized = toGeminiGatewayError(error);
+      throw new GeminiGatewayError(normalized.code as GeminiErrorCode, normalized.message, {
+        cause: normalized.cause,
+        retryable: normalized.retryable,
+        durationMs: Date.now() - started,
+      });
+    }
+  }
+
+  /**
    * Generate batch-delta content (Phase 11). Plain-text output — the user's
    * CONTENT_GENERATION system prompt controls style, length and structure.
    * Stateless: system prompt + destination + current batch delta only.
@@ -548,6 +877,77 @@ export class GeminiGateway {
       });
     }
   }
+
+  /**
+   * Processing newsroom reporter. Produces structured editorial stories (H2 +
+   * paragraphs) for one destination from the backend-computed diffs — never
+   * re-derives novelty and never consults external knowledge. Uses the fixed
+   * internal reporter prompt (product logic, not a user-configurable setting).
+   */
+  async generateNewsroom(input: {
+    apiKey: string;
+    modelId: string;
+    payload: NewsroomPayload;
+  }): Promise<{ stories: NewsroomStory[]; usage: GeminiUsage; durationMs: number }> {
+    const ai = new GoogleGenAI({ apiKey: input.apiKey });
+    const started = Date.now();
+    try {
+      const response = await ai.models.generateContent({
+        model: input.modelId,
+        contents: [{ role: 'user', parts: [{ text: JSON.stringify(input.payload) }] }],
+        config: {
+          systemInstruction: { role: 'system', parts: [{ text: NEWSROOM_REPORTER_PROMPT }] },
+          responseJsonSchema: {
+            type: 'object',
+            properties: {
+              stories: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    headline: { type: 'string' },
+                    paragraphs: { type: 'array', items: { type: 'string' } },
+                  },
+                  required: ['headline', 'paragraphs'],
+                },
+              },
+            },
+            required: ['stories'],
+          },
+        },
+      });
+      const raw = response.text ?? '';
+      if (raw.trim().length === 0) {
+        throw new GeminiGatewayError('GEMINI_API_ERROR', 'تولید گزارش پردازش خروجی خالی برگرداند.', {
+          durationMs: Date.now() - started,
+        });
+      }
+      const jsonStart = raw.indexOf('{');
+      const jsonEnd = raw.lastIndexOf('}');
+      const json = jsonStart >= 0 && jsonEnd > jsonStart ? raw.slice(jsonStart, jsonEnd + 1) : raw;
+      const parsed = JSON.parse(json) as unknown;
+      const result = newsroomStoriesSchema.safeParse(parsed);
+      if (!result.success) {
+        throw new GeminiGatewayError('GEMINI_API_ERROR', 'خروجی ساخت‌یافته گزارش پردازش نامعتبر بود.', {
+          cause: result.error.message,
+          durationMs: Date.now() - started,
+        });
+      }
+      return {
+        stories: result.data.stories,
+        usage: normalizeUsage(response.usageMetadata),
+        durationMs: Date.now() - started,
+      };
+    } catch (error) {
+      if (error instanceof GeminiGatewayError) throw error;
+      const normalized = toGeminiGatewayError(error);
+      throw new GeminiGatewayError(normalized.code as GeminiErrorCode, normalized.message, {
+        cause: normalized.cause,
+        retryable: normalized.retryable,
+        durationMs: Date.now() - started,
+      });
+    }
+  }
 }
 
 export const geminiGateway = new GeminiGateway();
@@ -559,6 +959,8 @@ export type GeminiGatewayLike = Pick<
   | 'listModels'
   | 'transcribeAudio'
   | 'analyzeKnowledge'
+  | 'analyzeNotes'
+  | 'compareNote'
   | 'createEmbedding'
   | 'classifyDelta'
   | 'generateContent'

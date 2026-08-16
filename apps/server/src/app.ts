@@ -12,6 +12,8 @@ import { destinationRoutes } from './routes/destinations.js';
 import { knowledgeRoutes } from './routes/knowledge.js';
 import { contentRoutes } from './routes/content.js';
 import { pipelineRoutes } from './routes/pipeline.js';
+import { sessionRoutes } from './routes/sessions.js';
+import { destinationNoteRoutes } from './routes/destination-notes.js';
 
 export interface BuildAppOptions {
   /** Pino options passed to Fastify's built-in logger (which is pino). */
@@ -32,5 +34,7 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.register(knowledgeRoutes);
   app.register(contentRoutes);
   app.register(pipelineRoutes);
+  app.register(sessionRoutes);
+  app.register(destinationNoteRoutes);
   return app;
 }

@@ -41,6 +41,45 @@ function confidencePercent(confidence: DestinationConfidence | undefined): numbe
  */
 export class DestinationService {
   /**
+   * Role-aware destination resolution for the simplified note model. Only a
+   * place whose role is DESTINATION (the note is about it) creates or reuses
+   * a destination row. ORIGIN / TRANSIT / COMPARISON / OTHER are never stored
+   * as destinations — a note about "from Tabriz to Mashhad" yields Mashhad
+   * only. Returns null when the note must not create a destination.
+   */
+  async resolveOrCreateNoteDestination(
+    proposal: { name: string; role?: string },
+    batchId: number | null,
+    db: DbExecutor = getDatabase(),
+  ): Promise<{ id: number; created: boolean } | null> {
+    const role = (proposal.role ?? 'DESTINATION').toUpperCase();
+    if (role !== 'DESTINATION') return null;
+    const name = proposal.name.trim();
+    if (name.length === 0) return null;
+
+    const normalized = normalizeDestinationName(name);
+    const existing = await this.findByNormalizedName(normalized, db);
+    if (existing) return { id: existing.id, created: false };
+
+    const now = new Date();
+    const inserted = await db
+      .insert(destinations)
+      .values({
+        canonicalName: name,
+        normalizedName: normalized,
+        type: 'OTHER',
+        status: 'CONFIRMED',
+        firstSeenBatchId: batchId,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: destinations.id });
+    const id = inserted[0]?.id;
+    if (id === undefined) return null;
+    return { id, created: true };
+  }
+
+  /**
    * Resolve a destination proposal to an existing row or create a new one.
    * Returns null for UNKNOWN confidence — no fake destinations.
    */

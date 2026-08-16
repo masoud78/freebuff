@@ -1,11 +1,10 @@
-import { LayoutGrid, Layers, MapPin, Settings, Sparkles } from 'lucide-react';
+import { AudioLines, MapPin, Settings, Sparkles } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 import type { ComponentStatus, SystemStatusState } from '../features/system-status/useSystemStatus';
 
 const NAV_ITEMS = [
-  { to: '/', label: 'نمای کلی', icon: LayoutGrid, end: true },
-  { to: '/batches', label: 'Batches', icon: Layers, end: false },
-  { to: '/destinations', label: 'مقصدها', icon: MapPin, end: false },
+  { to: '/', label: 'پردازش جدید', icon: AudioLines, end: true },
+  { to: '/destinations', label: 'مقاصد', icon: MapPin, end: false },
   { to: '/settings', label: 'تنظیمات', icon: Settings, end: false },
 ] as const;
 

@@ -164,6 +164,14 @@ class E2EGateway implements GeminiGatewayLike {
     };
   }
 
+  async analyzeNotes(): Promise<never> {
+    throw new Error('not used in this test suite');
+  }
+
+  async compareNote(): Promise<never> {
+    throw new Error('not used in this test suite');
+  }
+
   async createEmbedding(): Promise<{ embedding: number[]; usage: GeminiUsage; durationMs: number }> {
     return { embedding: [0.1, 0.2, 0.3], usage: ZERO_USAGE, durationMs: 5 };
   }

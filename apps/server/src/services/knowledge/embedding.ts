@@ -67,6 +67,7 @@ export class EmbeddingService {
       knowledgeId?: number | null;
       knowledgeVersionId?: number | null;
       candidateId?: number | null;
+      noteId?: number | null;
     },
     gateway: EmbeddingGatewayLike,
     apiKey: string,
@@ -80,11 +81,22 @@ export class EmbeddingService {
     );
 
     const existing = await db
-      .select({ id: knowledgeEmbeddings.id, embedding: knowledgeEmbeddings.embedding })
+      .select({
+        id: knowledgeEmbeddings.id,
+        embedding: knowledgeEmbeddings.embedding,
+        noteId: knowledgeEmbeddings.noteId,
+      })
       .from(knowledgeEmbeddings)
       .where(cacheKey)
       .get();
     if (existing) {
+      // Attach the note id to a previously-created candidate/cache vector.
+      if (input.noteId != null && existing.noteId == null) {
+        await db
+          .update(knowledgeEmbeddings)
+          .set({ noteId: input.noteId })
+          .where(eq(knowledgeEmbeddings.id, existing.id));
+      }
       return {
         embedding: parseEmbedding(existing.embedding),
         fromCache: true,
@@ -111,6 +123,7 @@ export class EmbeddingService {
         knowledgeId: input.knowledgeId ?? null,
         knowledgeVersionId: input.knowledgeVersionId ?? null,
         candidateId: input.candidateId ?? null,
+        noteId: input.noteId ?? null,
         modelId: input.modelId,
         sourceHash,
         dimensions: result.embedding.length,

@@ -4,6 +4,7 @@ import { batches } from '../core/database/schema.js';
 import { batchService } from './batches.service.js';
 import { jobService } from './jobs.service.js';
 import { batchFinalizationService } from './knowledge/batch-finalization.service.js';
+import { sessionsService } from './sessions.service.js';
 
 /**
  * PipelineRecoveryService (Phase 12 §7–8). Runs once at startup:
@@ -50,9 +51,25 @@ export class PipelineRecoveryService {
           const finalized = await batchFinalizationService.finalizeIfComplete(row.id);
           if (finalized) finalizedBatches += 1;
         }
+        // Simplified session flow: recompute the user-facing stage too.
+        await sessionsService.advanceStageIfTerminal(row.id);
       } catch (error) {
         // A single bad batch must not block startup recovery for the rest.
         console.error('[pipeline-recovery] failed to heal batch', { batchId: row.id, err: error });
+      }
+    }
+
+    // Sessions whose batch status already settled (e.g. TRANSCRIBED/COMMITTED)
+    // still need their user-facing stage recomputed after a restart.
+    const sessionRows = await db
+      .select({ id: batches.id })
+      .from(batches)
+      .where(sql`${batches.sessionStage} IN ('TRANSCRIBE', 'PROCESS')`);
+    for (const row of sessionRows) {
+      try {
+        await sessionsService.advanceStageIfTerminal(row.id);
+      } catch (error) {
+        console.error('[pipeline-recovery] failed to advance session stage', { batchId: row.id, err: error });
       }
     }
 

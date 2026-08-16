@@ -88,6 +88,11 @@ export type NewPromptVersionRow = typeof promptVersions.$inferInsert;
 export const batches = sqliteTable('batches', {
   id: integer('id').primaryKey(),
   status: text('status').notNull().default('CREATED'),
+  /** User-facing stage of the simplified product flow (UPLOAD → … → COMMITTED). */
+  sessionStage: text('session_stage').notNull().default('UPLOAD'),
+  /** Soft-delete marker: committed sessions are soft-deleted so committed
+   * source transcripts keep a valid batch/audio FK chain. */
+  deletedAt: integer('deleted_at', { mode: 'timestamp_ms' }),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
   startedAt: integer('started_at', { mode: 'timestamp_ms' }),
@@ -115,6 +120,9 @@ export const audioFiles = sqliteTable(
     // No FK constraint: a self-reference here creates a circular table
     // definition. Referential integrity is enforced by the service layer.
     duplicateOfAudioId: integer('duplicate_of_audio_id'),
+    /** Soft-delete marker: set when a voice is deleted so transcripts that
+     * reference it (committed-note audit trail) keep a valid FK target. */
+    deletedAt: integer('deleted_at', { mode: 'timestamp_ms' }),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
   },
@@ -490,6 +498,8 @@ export const knowledgeEmbeddings = sqliteTable(
     knowledgeId: integer('knowledge_id'),
     knowledgeVersionId: integer('knowledge_version_id'),
     candidateId: integer('candidate_id'),
+    /** Optional link to a destination note (simplified product model). */
+    noteId: integer('note_id'),
     modelId: text('model_id').notNull(),
     sourceHash: text('source_hash').notNull(),
     dimensions: integer('dimensions').notNull(),
@@ -714,3 +724,323 @@ export const generatedContentKnowledge = sqliteTable(
 
 export type GeneratedContentKnowledgeRow = typeof generatedContentKnowledge.$inferSelect;
 export type NewGeneratedContentKnowledgeRow = typeof generatedContentKnowledge.$inferInsert;
+
+// ---------------------------------------------------------------------------
+// Simplified product model: Destination Notes, Voice Reports, proposals & logs
+// ---------------------------------------------------------------------------
+
+/** A short, descriptive report of a whole audio conversation (not knowledge). */
+export const voiceReports = sqliteTable(
+  'voice_reports',
+  {
+    id: integer('id').primaryKey(),
+    audioId: integer('audio_id')
+      .notNull()
+      .references(() => audioFiles.id),
+    transcriptId: integer('transcript_id')
+      .notNull()
+      .references(() => transcripts.id),
+    report: text('report').notNull(),
+    /** Short topic phrase of the whole conversation (e.g. «بررسی هتل‌های مشهد»). */
+    conversationTopic: text('conversation_topic'),
+    /** ACTIONABLE | NO_USEFUL_KNOWLEDGE | NO_NEW_KNOWLEDGE */
+    resultStatus: text('result_status').notNull().default('ACTIONABLE'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [uniqueIndex('voice_reports_audio_unique_idx').on(table.audioId)],
+);
+
+export type VoiceReportRow = typeof voiceReports.$inferSelect;
+export type NewVoiceReportRow = typeof voiceReports.$inferInsert;
+
+/**
+ * A proposed note change, pending user review. Extraction never mutates the
+ * destination database — proposals are committed only via the Apply action.
+ */
+export const noteProposals = sqliteTable(
+  'note_proposals',
+  {
+    id: integer('id').primaryKey(),
+    batchId: integer('batch_id')
+      .notNull()
+      .references(() => batches.id),
+    transcriptId: integer('transcript_id')
+      .notNull()
+      .references(() => transcripts.id),
+    audioId: integer('audio_id')
+      .notNull()
+      .references(() => audioFiles.id),
+    destinationId: integer('destination_id').references(() => destinations.id),
+    title: text('title').notNull(),
+    description: text('description').notNull(),
+    relevantDate: text('relevant_date'),
+    /** TOUR_INFO | DESTINATION_INFO | TRAVELER_GUIDANCE */
+    noteKind: text('note_kind').notNull().default('DESTINATION_INFO'),
+    /** DESTINATION | TOUR */
+    scopeType: text('scope_type').notNull().default('DESTINATION'),
+    /** Optional free-text tour subject when scopeType = TOUR. */
+    tourSubject: text('tour_subject'),
+    /** ADD | UPDATE | MARK_OUTDATED | NO_CHANGE */
+    proposedAction: text('proposed_action').notNull(),
+    /** Target existing note for UPDATE / MARK_OUTDATED / NO_CHANGE. */
+    matchedNoteId: integer('matched_note_id'),
+    /** Short, safe Persian summary of why this action was proposed. */
+    reasonSummary: text('reason_summary'),
+    /** Human, grounded reason written to the destination change log on commit. */
+    logReason: text('log_reason'),
+    /** PENDING | COMMITTED | FAILED */
+    status: text('status').notNull().default('PENDING'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    index('note_proposals_batch_idx').on(table.batchId),
+    index('note_proposals_destination_idx').on(table.destinationId),
+  ],
+);
+
+export type NoteProposalRow = typeof noteProposals.$inferSelect;
+export type NewNoteProposalRow = typeof noteProposals.$inferInsert;
+
+/** Master destination notes — the user-facing knowledge database. */
+export const destinationNotes = sqliteTable(
+  'destination_notes',
+  {
+    id: integer('id').primaryKey(),
+    destinationId: integer('destination_id')
+      .notNull()
+      .references(() => destinations.id),
+    currentTitle: text('current_title').notNull(),
+    currentDescription: text('current_description').notNull(),
+    /** TOUR_INFO | DESTINATION_INFO | TRAVELER_GUIDANCE */
+    noteKind: text('note_kind').notNull().default('DESTINATION_INFO'),
+    /** DESTINATION | TOUR */
+    scopeType: text('scope_type').notNull().default('DESTINATION'),
+    /** Optional free-text tour subject when scopeType = TOUR. */
+    tourSubject: text('tour_subject'),
+    /** CURRENT | OUTDATED */
+    status: text('status').notNull().default('CURRENT'),
+    relevantDate: text('relevant_date'),
+    firstObservedAt: integer('first_observed_at', { mode: 'timestamp_ms' }).notNull(),
+    lastUpdatedAt: integer('last_updated_at', { mode: 'timestamp_ms' }).notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    index('destination_notes_destination_idx').on(table.destinationId),
+    index('destination_notes_status_idx').on(table.status),
+  ],
+);
+
+export type DestinationNoteRow = typeof destinationNotes.$inferSelect;
+export type NewDestinationNoteRow = typeof destinationNotes.$inferInsert;
+
+/** Version history of a destination note (append-only). */
+export const destinationNoteVersions = sqliteTable(
+  'destination_note_versions',
+  {
+    id: integer('id').primaryKey(),
+    noteId: integer('note_id')
+      .notNull()
+      .references(() => destinationNotes.id),
+    versionNumber: integer('version_number').notNull(),
+    title: text('title').notNull(),
+    description: text('description').notNull(),
+    relevantDate: text('relevant_date'),
+    sourceProcessingId: integer('source_processing_id'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [index('destination_note_versions_note_idx').on(table.noteId)],
+);
+
+export type DestinationNoteVersionRow = typeof destinationNoteVersions.$inferSelect;
+export type NewDestinationNoteVersionRow = typeof destinationNoteVersions.$inferInsert;
+
+/** Which voices/transcripts a destination note came from. */
+export const destinationNoteSources = sqliteTable(
+  'destination_note_sources',
+  {
+    id: integer('id').primaryKey(),
+    noteId: integer('note_id')
+      .notNull()
+      .references(() => destinationNotes.id),
+    audioId: integer('audio_id').references(() => audioFiles.id),
+    transcriptId: integer('transcript_id')
+      .notNull()
+      .references(() => transcripts.id),
+    processingSessionId: integer('processing_session_id'),
+    /** Filename snapshot so audit history survives voice deletion. */
+    audioNameSnapshot: text('audio_name_snapshot'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    // A transcript evidences a note version only once (replay safety).
+    uniqueIndex('destination_note_sources_unique_idx').on(table.noteId, table.transcriptId),
+    index('destination_note_sources_note_idx').on(table.noteId),
+  ],
+);
+
+export type DestinationNoteSourceRow = typeof destinationNoteSources.$inferSelect;
+export type NewDestinationNoteSourceRow = typeof destinationNoteSources.$inferInsert;
+
+/** Source of truth for the destination change-log timeline. */
+export const destinationNoteLogs = sqliteTable(
+  'destination_note_logs',
+  {
+    id: integer('id').primaryKey(),
+    destinationId: integer('destination_id')
+      .notNull()
+      .references(() => destinations.id),
+    noteId: integer('note_id').references(() => destinationNotes.id),
+    /** NOTE_ADDED | NOTE_UPDATED | NOTE_MARKED_OUTDATED */
+    eventType: text('event_type').notNull(),
+    sourceAudioIds: text('source_audio_ids'),
+    sourceProcessingSession: integer('source_processing_session'),
+    reason: text('reason'),
+    oldVersionId: integer('old_version_id'),
+    newVersionId: integer('new_version_id'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    index('destination_note_logs_destination_idx').on(table.destinationId),
+    index('destination_note_logs_note_idx').on(table.noteId),
+  ],
+);
+
+export type DestinationNoteLogRow = typeof destinationNoteLogs.$inferSelect;
+export type NewDestinationNoteLogRow = typeof destinationNoteLogs.$inferInsert;
+
+/**
+ * Master inferred audience insights — a knowledge type separate from factual
+ * destination notes. Insights are grounded inferences about the traveler
+ * (concerns, behaviors, decision factors), never facts about the destination.
+ */
+export const destinationAudienceInsights = sqliteTable(
+  'destination_audience_insights',
+  {
+    id: integer('id').primaryKey(),
+    destinationId: integer('destination_id')
+      .notNull()
+      .references(() => destinations.id),
+    title: text('title').notNull(),
+    description: text('description').notNull(),
+    /** Short explanation of why this inference was made (traceable to voice). */
+    inferenceBasis: text('inference_basis').notNull(),
+    /** 0–100 confidence. */
+    confidence: integer('confidence').notNull().default(50),
+    contentOpportunityTitle: text('content_opportunity_title'),
+    contentOpportunityReason: text('content_opportunity_reason'),
+    /** CURRENT | OUTDATED */
+    status: text('status').notNull().default('CURRENT'),
+    firstObservedAt: integer('first_observed_at', { mode: 'timestamp_ms' }).notNull(),
+    lastUpdatedAt: integer('last_updated_at', { mode: 'timestamp_ms' }).notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    index('destination_audience_insights_destination_idx').on(table.destinationId),
+    index('destination_audience_insights_status_idx').on(table.status),
+  ],
+);
+
+export type DestinationAudienceInsightRow = typeof destinationAudienceInsights.$inferSelect;
+export type NewDestinationAudienceInsightRow = typeof destinationAudienceInsights.$inferInsert;
+
+/** Pending audience insight proposals — committed only via the Apply action. */
+export const insightProposals = sqliteTable(
+  'insight_proposals',
+  {
+    id: integer('id').primaryKey(),
+    batchId: integer('batch_id')
+      .notNull()
+      .references(() => batches.id),
+    transcriptId: integer('transcript_id')
+      .notNull()
+      .references(() => transcripts.id),
+    audioId: integer('audio_id')
+      .notNull()
+      .references(() => audioFiles.id),
+    destinationId: integer('destination_id').references(() => destinations.id),
+    title: text('title').notNull(),
+    description: text('description').notNull(),
+    inferenceBasis: text('inference_basis').notNull(),
+    confidence: integer('confidence').notNull().default(50),
+    contentOpportunityTitle: text('content_opportunity_title'),
+    contentOpportunityReason: text('content_opportunity_reason'),
+    /** ADD | MERGE | NO_CHANGE */
+    proposedAction: text('proposed_action').notNull(),
+    matchedInsightId: integer('matched_insight_id'),
+    /** PENDING | COMMITTED | FAILED */
+    status: text('status').notNull().default('PENDING'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    index('insight_proposals_batch_idx').on(table.batchId),
+    index('insight_proposals_destination_idx').on(table.destinationId),
+  ],
+);
+
+export type InsightProposalRow = typeof insightProposals.$inferSelect;
+export type NewInsightProposalRow = typeof insightProposals.$inferInsert;
+
+/** Which voices/transcripts an audience insight came from (deduplicated). */
+export const destinationInsightSources = sqliteTable(
+  'destination_insight_sources',
+  {
+    id: integer('id').primaryKey(),
+    insightId: integer('insight_id')
+      .notNull()
+      .references(() => destinationAudienceInsights.id),
+    audioId: integer('audio_id').references(() => audioFiles.id),
+    transcriptId: integer('transcript_id')
+      .notNull()
+      .references(() => transcripts.id),
+    processingSessionId: integer('processing_session_id'),
+    /** Short evidence summary traceable to the transcript (not shown raw). */
+    evidenceSummary: text('evidence_summary'),
+    /** Filename snapshot so audit history survives voice deletion. */
+    audioNameSnapshot: text('audio_name_snapshot'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('destination_insight_sources_unique_idx').on(table.insightId, table.transcriptId),
+    index('destination_insight_sources_insight_idx').on(table.insightId),
+  ],
+);
+
+export type DestinationInsightSourceRow = typeof destinationInsightSources.$inferSelect;
+export type NewDestinationInsightSourceRow = typeof destinationInsightSources.$inferInsert;
+
+/**
+ * Per-destination processing newsroom — the narrative of what this processing
+ * session actually changed/adds, built from the backend's reconciliation diffs
+ * (never re-derived by the reporter). Survives restart, kept after commit.
+ */
+export const processingDestinationNews = sqliteTable(
+  'processing_destination_news',
+  {
+    id: integer('id').primaryKey(),
+    processingSessionId: integer('processing_session_id')
+      .notNull()
+      .references(() => batches.id),
+    destinationId: integer('destination_id')
+      .notNull()
+      .references(() => destinations.id),
+    content: text('content').notNull(),
+    /** Structured editorial stories (JSON: {stories:[{headline,paragraphs[]}]}).
+     * Null for the deterministic "no news" narrative (plain `content` only). */
+    storiesJson: text('stories_json'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('processing_destination_news_unique_idx').on(
+      table.processingSessionId,
+      table.destinationId,
+    ),
+    index('processing_destination_news_session_idx').on(table.processingSessionId),
+  ],
+);
+
+export type ProcessingDestinationNewsRow = typeof processingDestinationNews.$inferSelect;
+export type NewProcessingDestinationNewsRow = typeof processingDestinationNews.$inferInsert;

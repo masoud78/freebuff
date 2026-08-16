@@ -232,7 +232,7 @@ export class BatchService {
       const row = inserted[0];
       if (!row) throw new Error('batch insert returned no row');
       return toSummary(
-        { ...row, startedAt: null, completedAt: null },
+        { ...row, sessionStage: 'UPLOAD', deletedAt: null, startedAt: null, completedAt: null },
         {
           totalAudio: 0,
           newAudio: 0,

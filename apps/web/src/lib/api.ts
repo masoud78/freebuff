@@ -16,13 +16,18 @@ import type {
   BatchUsageResponse,
   CancelBatchResponse,
   CandidateRetrievalDebugResponse,
+  CleanTranscriptResponse,
+  CommitResponse,
   ConflictResolveResponse,
   ContentRegenerateResponse,
   DestinationConflictsResponse,
   DestinationContentHistoryResponse,
   DestinationDetailResponse,
+  DestinationListItem,
   DestinationListResponse,
   DestinationMasterKnowledgeResponse,
+  DestinationNoteListResponse,
+  DestinationSourceVoiceNotesResponse,
   GeminiCredentialStatusResponse,
   GeminiModelsResponse,
   GeminiTestConnectionResponse,
@@ -36,6 +41,8 @@ import type {
   PipelinePreflightResponse,
   PromptTemplatesResponse,
   PromptVersionsResponse,
+  SessionDetail,
+  SessionSummary,
   TranscriptKnowledgeInfo,
   TranscriptResponse,
 } from '@freebuff/contracts';
@@ -456,5 +463,142 @@ export function resolveConflict(
     method: 'POST',
     headers: JSON_HEADERS,
     body: JSON.stringify({ action, note }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Simplified product flow — processing sessions, notes & destinations
+// ---------------------------------------------------------------------------
+
+export function createSession(): Promise<SessionSummary> {
+  return request<SessionSummary>(`${API_BASE_URL}/api/sessions`, { method: 'POST' });
+}
+
+/** Lazy processing creation: first successful upload creates + persists the session. */
+export async function uploadNewSession(
+  files: File[],
+): Promise<{ session: SessionSummary; sessionId: number; registered: number; duplicates: number; unsupported: number }> {
+  const body = new FormData();
+  for (const file of files) {
+    body.append('files', file, file.name);
+  }
+  const response = await fetch(`${API_BASE_URL}/api/sessions/upload`, { method: 'POST', body });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as {
+    session: SessionSummary;
+    sessionId: number;
+    registered: number;
+    duplicates: number;
+    unsupported: number;
+  };
+}
+
+export function fetchSessions(): Promise<SessionSummary[]> {
+  return request<SessionSummary[]>(`${API_BASE_URL}/api/sessions`);
+}
+
+export function fetchSession(id: number): Promise<SessionDetail> {
+  return request<SessionDetail>(`${API_BASE_URL}/api/sessions/${id}`);
+}
+
+/** Real multipart upload from the browser. */
+export async function uploadSessionFiles(
+  id: number,
+  files: File[],
+): Promise<{ sessionId: number; registered: number; duplicates: number; unsupported: number }> {
+  const body = new FormData();
+  for (const file of files) {
+    body.append('files', file, file.name);
+  }
+  const response = await fetch(`${API_BASE_URL}/api/sessions/${id}/upload`, { method: 'POST', body });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as { sessionId: number; registered: number; duplicates: number; unsupported: number };
+}
+
+export function startSessionTranscription(id: number): Promise<SessionDetail> {
+  return request<SessionDetail>(`${API_BASE_URL}/api/sessions/${id}/transcribe`, { method: 'POST' });
+}
+
+export function startSessionProcessing(id: number): Promise<SessionDetail> {
+  return request<SessionDetail>(`${API_BASE_URL}/api/sessions/${id}/process`, { method: 'POST' });
+}
+
+export function commitSession(id: number): Promise<CommitResponse> {
+  return request<CommitResponse>(`${API_BASE_URL}/api/sessions/${id}/commit`, { method: 'POST' });
+}
+
+export function fetchSessionTranscript(
+  sessionId: number,
+  audioId: number,
+): Promise<CleanTranscriptResponse> {
+  return request<CleanTranscriptResponse>(
+    `${API_BASE_URL}/api/sessions/${sessionId}/audio/${audioId}/transcript`,
+  );
+}
+
+export function fetchAudioTranscript(audioId: number): Promise<CleanTranscriptResponse> {
+  return request<CleanTranscriptResponse>(`${API_BASE_URL}/api/audio/${audioId}/transcript`);
+}
+
+export function fetchTranscriptById(transcriptId: number): Promise<CleanTranscriptResponse> {
+  return request<CleanTranscriptResponse>(`${API_BASE_URL}/api/transcripts/${transcriptId}`);
+}
+
+/** Retry one permanently failed audio. */
+export function retrySessionAudio(sessionId: number, audioId: number): Promise<SessionDetail> {
+  return request<SessionDetail>(`${API_BASE_URL}/api/sessions/${sessionId}/audio/${audioId}/retry`, {
+    method: 'POST',
+  });
+}
+
+/** Delete one voice. */
+export function deleteSessionVoice(
+  sessionId: number,
+  audioId: number,
+): Promise<{ deleted: boolean; committed: boolean }> {
+  return request<{ deleted: boolean; committed: boolean }>(
+    `${API_BASE_URL}/api/sessions/${sessionId}/audio/${audioId}`,
+    { method: 'DELETE' },
+  );
+}
+
+/** Delete a whole processing session. */
+export function deleteSession(id: number): Promise<{ deleted: boolean; committed: boolean }> {
+  return request<{ deleted: boolean; committed: boolean }>(`${API_BASE_URL}/api/sessions/${id}`, {
+    method: 'DELETE',
+  });
+}
+
+export function fetchDestinationNotes(): Promise<DestinationListItem[]> {
+  return request<DestinationListItem[]>(`${API_BASE_URL}/api/destination-notes`);
+}
+
+export function fetchDestinationNoteDetail(
+  id: number,
+  status: 'CURRENT' | 'OUTDATED' | 'ALL' = 'CURRENT',
+): Promise<DestinationNoteListResponse> {
+  return request<DestinationNoteListResponse>(
+    `${API_BASE_URL}/api/destination-notes/${id}?status=${status}`,
+  );
+}
+
+/** Full extracted notes of one source voice for one destination. */
+export function fetchSourceVoiceNotes(
+  destinationId: number,
+  transcriptId: number,
+): Promise<DestinationSourceVoiceNotesResponse> {
+  return request<DestinationSourceVoiceNotesResponse>(
+    `${API_BASE_URL}/api/destination-notes/${destinationId}/sources/${transcriptId}/notes`,
+  );
+}
+
+/** Delete a destination and its scoped data (audio/transcripts preserved). */
+export function deleteDestination(id: number): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>(`${API_BASE_URL}/api/destination-notes/${id}`, {
+    method: 'DELETE',
   });
 }

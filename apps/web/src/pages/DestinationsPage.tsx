@@ -1,33 +1,13 @@
-import { MapPin, RefreshCw } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { MapPin, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import type { DestinationListResponse, DestinationSummary } from '@freebuff/contracts';
+import type { DestinationListItem } from '@freebuff/contracts';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import { EmptyState } from '../components/EmptyState';
 import { ErrorState } from '../components/ErrorState';
 import { LoadingState } from '../components/LoadingState';
 import { PageHeader } from '../components/PageHeader';
-import { StatusBadge, type StatusTone } from '../components/StatusBadge';
-import { fetchDestinations } from '../lib/api';
-
-const TYPE_TONE: Record<DestinationSummary['type'], StatusTone> = {
-  CITY: 'success',
-  COUNTRY: 'neutral',
-  REGION: 'warning',
-  OTHER: 'neutral',
-};
-
-const STATUS_TONE: Record<DestinationSummary['status'], StatusTone> = {
-  PROVISIONAL: 'warning',
-  CONFIRMED: 'success',
-  MERGED: 'neutral',
-};
-
-const TYPE_LABEL: Record<DestinationSummary['type'], string> = {
-  CITY: 'شهر',
-  COUNTRY: 'کشور',
-  REGION: 'منطقه',
-  OTHER: 'سایر',
-};
+import { deleteDestination, fetchDestinationNotes } from '../lib/api';
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('fa-IR', {
@@ -38,20 +18,35 @@ function formatDate(iso: string): string {
 }
 
 export function DestinationsPage() {
-  const [destinations, setDestinations] = useState<DestinationListResponse>([]);
+  const [destinations, setDestinations] = useState<DestinationListItem[]>([]);
+  const [query, setQuery] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<DestinationListItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const navigate = useNavigate();
+
+  const load = useCallback(() => {
+    setIsLoading(true);
+    setLoadError(null);
+    void fetchDestinationNotes()
+      .then(setDestinations)
+      .catch((error: unknown) => {
+        setLoadError(error instanceof Error ? error.message : 'خطا در دریافت مقصدها.');
+      })
+      .finally(() => setIsLoading(false));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    fetchDestinations()
+    fetchDestinationNotes()
       .then((result) => {
-        if (!cancelled) setDestinations(result);
+        if (cancelled) return;
+        setDestinations(result);
       })
       .catch((error: unknown) => {
-        if (!cancelled)
-          setLoadError(error instanceof Error ? error.message : 'خطا در دریافت مقصدها.');
+        if (cancelled) return;
+        setLoadError(error instanceof Error ? error.message : 'خطا در دریافت مقصدها.');
       })
       .finally(() => {
         if (!cancelled) setIsLoading(false);
@@ -61,23 +56,39 @@ export function DestinationsPage() {
     };
   }, []);
 
-  const retry = () => {
-    setIsLoading(true);
-    setLoadError(null);
-    void fetchDestinations()
-      .then(setDestinations)
-      .catch((error: unknown) => {
-        setLoadError(error instanceof Error ? error.message : 'خطا در دریافت مقصدها.');
-      })
-      .finally(() => setIsLoading(false));
+  const handleDelete = async () => {
+    if (!confirm) return;
+    setDeleting(true);
+    try {
+      await deleteDestination(confirm.id);
+      setConfirm(null);
+      setDestinations((prev) => prev.filter((dest) => dest.id !== confirm.id));
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'حذف مقصد ممکن نشد.');
+      setConfirm(null);
+    } finally {
+      setDeleting(false);
+    }
   };
+
+  const filtered = destinations.filter((dest) =>
+    dest.canonicalName.toLowerCase().includes(query.trim().toLowerCase()),
+  );
 
   return (
     <>
-      <PageHeader
-        title="مقصدها"
-        description="مقصدهای شناسایی‌شده از Transcriptها و دانش استخراج‌شده برای هر یک"
-      />
+      <PageHeader title="مقاصد" description="نکات ذخیره‌شده برای هر مقصد" />
+
+      <div className="relative mb-4">
+        <Search className="pointer-events-none absolute start-3 top-1/2 size-4 -translate-y-1/2 text-text-muted" aria-hidden="true" />
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="جستجوی مقصد…"
+          className="w-full rounded-md border border-border bg-surface py-2 pe-3 ps-9 text-sm text-text-primary placeholder:text-text-muted focus:outline-2 focus:outline-accent"
+        />
+      </div>
 
       {isLoading ? (
         <LoadingState label="در حال دریافت مقصدها…" />
@@ -87,7 +98,7 @@ export function DestinationsPage() {
           action={
             <button
               type="button"
-              onClick={retry}
+              onClick={() => void load()}
               className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-muted"
             >
               <RefreshCw className="size-3.5" aria-hidden="true" />
@@ -95,50 +106,65 @@ export function DestinationsPage() {
             </button>
           }
         />
-      ) : destinations.length === 0 ? (
+      ) : filtered.length === 0 ? (
         <EmptyState
           icon={<MapPin className="size-5" />}
-          title="هنوز مقصدی شناسایی نشده است"
-          description="پس از تکمیل تحلیل دانش، مقصدهای هر Transcript در اینجا نمایش داده می‌شوند."
+          title="هنوز مقصدی ثبت نشده است"
+          description="پس از پردازش ویس‌ها و اعمال تغییرات، مقصدها اینجا ظاهر می‌شوند."
         />
       ) : (
         <div className="overflow-hidden rounded-lg border border-border bg-surface shadow-card">
           <ul className="divide-y divide-border">
-            {destinations.map((destination) => (
-              <li key={destination.id}>
+            {filtered.map((destination) => (
+              <li key={destination.id} className="flex items-center gap-2 px-5 py-4">
                 <button
                   type="button"
                   onClick={() => navigate(`/destinations/${destination.id}`)}
-                  className="flex w-full items-center justify-between gap-4 px-5 py-4 text-start transition-colors hover:bg-surface-muted"
+                  className="flex min-w-0 flex-1 items-center justify-between gap-4 text-start transition-colors"
                 >
-                  <div className="flex min-w-0 items-center gap-4">
-                    <span className="shrink-0 text-sm font-semibold text-text-primary">
-                      {destination.canonicalName}
-                    </span>
-                    <StatusBadge tone={TYPE_TONE[destination.type]} label={TYPE_LABEL[destination.type]} />
-                    {destination.aliases.length > 0 && (
-                      <span className="hidden truncate text-xs text-text-muted md:inline" dir="ltr">
-                        {destination.aliases.join('، ')}
-                      </span>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-text-primary">{destination.canonicalName}</p>
+                    {destination.lastUpdatedAt && (
+                      <p className="mt-0.5 text-xs text-text-muted">
+                        آخرین بروزرسانی: {formatDate(destination.lastUpdatedAt)}
+                      </p>
                     )}
                   </div>
-                  <div className="flex shrink-0 items-center gap-5 text-xs text-text-secondary">
-                    <StatusBadge tone={STATUS_TONE[destination.status]} label={destination.status} />
-                    <span>
-                      دانش: <strong className="text-text-primary">{destination.knowledgeCount}</strong>
-                    </span>
-                    <span>
-                      منبع: <strong className="text-text-primary">{destination.sourceTranscriptCount}</strong>
-                    </span>
-                    <span className="hidden text-text-muted sm:inline">
-                      {formatDate(destination.createdAt)}
-                    </span>
+                  <div className="shrink-0 text-xs text-text-secondary">
+                    {destination.currentNoteCount} نکته فعلی
+                    {destination.outdatedNoteCount > 0 && (
+                      <span className="ms-2 text-text-muted">· {destination.outdatedNoteCount} قدیمی</span>
+                    )}
                   </div>
+                </button>
+                <button
+                  type="button"
+                  aria-label={`حذف ${destination.canonicalName}`}
+                  onClick={() => setConfirm(destination)}
+                  className="shrink-0 rounded-md p-1.5 text-text-muted transition-colors hover:bg-danger-muted hover:text-danger"
+                >
+                  <Trash2 className="size-4" aria-hidden="true" />
                 </button>
               </li>
             ))}
           </ul>
         </div>
+      )}
+
+      {confirm && (
+        <ConfirmDialog
+          title="حذف مقصد"
+          description={
+            <>
+              مقصد <strong className="text-text-primary">«{confirm.canonicalName}»</strong> و همهٔ نکات،
+              نسخه‌ها و لاگ‌های آن برای همیشه حذف می‌شوند. فایل‌های صوتی و متن‌های منبع حذف نمی‌شوند.
+            </>
+          }
+          confirmLabel="حذف مقصد"
+          busy={deleting}
+          onConfirm={() => void handleDelete()}
+          onCancel={() => setConfirm(null)}
+        />
       )}
     </>
   );

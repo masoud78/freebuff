@@ -234,6 +234,39 @@ export class JobService {
       .get();
     return Number(row?.count ?? 0);
   }
+
+  /** Cancel every active (PENDING/RUNNING) job whose entity is in the list. */
+  async cancelActiveByEntityIds(entityIds: number[]): Promise<void> {
+    if (entityIds.length === 0) return;
+    await getDatabase()
+      .update(jobs)
+      .set({
+        status: 'CANCELLED',
+        lockedAt: null,
+        nextAttemptAt: null,
+        completedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(and(inArray(jobs.entityId, entityIds), inArray(jobs.status, ['PENDING', 'RUNNING'])));
+  }
+
+  /** Re-queue a terminal job by idempotency key (manual retry of a voice). */
+  async requeueJob(idempotencyKey: string): Promise<void> {
+    await getDatabase()
+      .update(jobs)
+      .set({
+        status: 'PENDING',
+        lockedAt: null,
+        completedAt: null,
+        errorCode: null,
+        errorMessage: null,
+        nextAttemptAt: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(jobs.idempotencyKey, idempotencyKey), inArray(jobs.status, ['FAILED', 'CANCELLED'])),
+      );
+  }
 }
 
 export const jobService = new JobService();

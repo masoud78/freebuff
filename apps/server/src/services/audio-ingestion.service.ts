@@ -3,7 +3,7 @@ import { createReadStream, promises as fs } from 'node:fs';
 import { extname, join } from 'node:path';
 import type { AudioStatus } from '@freebuff/contracts';
 import { SUPPORTED_AUDIO_EXTENSIONS } from '@freebuff/contracts';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { getDatabase } from '../core/database/client.js';
 import { audioFiles } from '../core/database/schema.js';
 import { DomainError } from './errors.js';
@@ -102,7 +102,7 @@ export class AudioIngestionService {
     const row = await db
       .select({ id: audioFiles.id })
       .from(audioFiles)
-      .where(eq(audioFiles.sha256, sha256))
+      .where(and(eq(audioFiles.sha256, sha256), isNull(audioFiles.deletedAt)))
       .orderBy(audioFiles.id)
       .limit(1)
       .get();

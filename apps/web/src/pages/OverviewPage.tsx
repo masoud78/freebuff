@@ -26,6 +26,8 @@ const BATCH_TONE: Record<string, StatusTone> = {
   COMPLETED: 'success',
   PARTIAL_FAILED: 'warning',
   FAILED: 'danger',
+  TRANSCRIBED: 'success',
+  COMMITTED: 'success',
   CANCELLED: 'neutral',
 };
 

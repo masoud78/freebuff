@@ -68,6 +68,14 @@ class MockGateway implements GeminiGatewayLike {
     throw new Error('not used in this test suite');
   }
 
+  async analyzeNotes(): Promise<never> {
+    throw new Error('not used in this test suite');
+  }
+
+  async compareNote(): Promise<never> {
+    throw new Error('not used in this test suite');
+  }
+
   async createEmbedding(): Promise<never> {
     throw new Error('not used in this test suite');
   }

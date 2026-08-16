@@ -3,6 +3,7 @@ import { initDatabase } from './core/database/index.js';
 import { contentWorker } from './services/content/content.worker.js';
 import { deltaWorker } from './services/knowledge/delta.worker.js';
 import { knowledgeWorker } from './services/knowledge/knowledge.worker.js';
+import { noteExtractionWorker } from './services/knowledge/note-extraction.worker.js';
 import { reconciliationWorker } from './services/knowledge/reconciliation.worker.js';
 import { pipelineRecoveryService } from './services/pipeline-recovery.service.js';
 import { promptsService } from './services/prompts.service.js';
@@ -18,8 +19,11 @@ try {
   await initDatabase();
   // Ensure default settings exist so the DB always has a settings row.
   await settingsService.ensureDefaultSettings();
-  // Seed the three default prompt templates (idempotent).
+  // Seed the three default prompt templates (idempotent), then activate the
+  // V2 prompt bodies as new versions for any prompt still on empty content.
   await promptsService.ensureDefaultTemplates();
+  await promptsService.ensureV2PromptVersions();
+  await promptsService.ensureV3PromptVersions();
   // Restart recovery (Phase 12 §7): requeue stale RUNNING jobs, heal batches
   // that were mid-flight, and resume finalization exactly once.
   const recovery = await pipelineRecoveryService.recover();
@@ -34,7 +38,10 @@ try {
   knowledgeWorker.start();
   deltaWorker.start();
   reconciliationWorker.start();
-  contentWorker.start();
+  noteExtractionWorker.start();
+  // Legacy content generation is no longer part of the main flow; the worker
+  // stays stopped so no CONTENT_GENERATION jobs are ever claimed.
+  // contentWorker.start();
 
   // Graceful shutdown: stop claiming new jobs and close the HTTP server;
   // in-flight Gemini requests get a chance to finish.
@@ -43,6 +50,7 @@ try {
     knowledgeWorker.stop();
     deltaWorker.stop();
     reconciliationWorker.stop();
+    noteExtractionWorker.stop();
     contentWorker.stop();
     void app.close().finally(() => process.exit(0));
   };

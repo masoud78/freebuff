@@ -2,7 +2,7 @@ import { statSync } from 'node:fs';
 import type { ApiUsageStatus, GeminiUsage } from '@freebuff/contracts';
 import { and, eq } from 'drizzle-orm';
 import { getDatabase } from '../../core/database/client.js';
-import { apiUsage, audioFiles, transcripts, transcriptSegments, type JobRow } from '../../core/database/schema.js';
+import { apiUsage, audioFiles, batches, transcripts, transcriptSegments, type JobRow } from '../../core/database/schema.js';
 import { DomainError } from '../errors.js';
 import { GeminiGatewayError, geminiGateway, type GeminiGatewayLike } from '../gemini/gateway.js';
 import { credentialStore } from '../gemini/credentials.store.js';
@@ -10,6 +10,7 @@ import { jobService, type DbExecutor } from '../jobs.service.js';
 import { modelsService } from '../models.service.js';
 import { promptsService } from '../prompts.service.js';
 import { batchService } from '../batches.service.js';
+import { sessionsService } from '../sessions.service.js';
 import { settingsService } from '../settings.service.js';
 import { hashText, normalizeText, segmentTranscript } from './normalize.js';
 
@@ -129,6 +130,15 @@ export class TranscriptionWorker {
         return;
       }
 
+      // 4.5 Session flow: the simplified pipeline never auto-creates the
+      //     legacy knowledge-analysis job (processing is user-triggered).
+      const batchRow = await db
+        .select({ sessionStage: batches.sessionStage })
+        .from(batches)
+        .where(eq(batches.id, batchId))
+        .get();
+      const isSessionFlow = batchRow?.sessionStage === 'TRANSCRIBE';
+
       // 5. File must exist on disk.
       try {
         if (!statSync(audio.absolutePath).isFile()) {
@@ -222,9 +232,11 @@ export class TranscriptionWorker {
         );
         await jobService.markCompleted(job.id, tx);
 
-        // Non-duplicate transcripts get exactly one knowledge-analysis job
-        // (created in the same transaction; duplicates skip it entirely).
-        if (dupOf === null) {
+        // Non-duplicate transcripts get exactly one legacy knowledge-analysis
+        // job (created in the same transaction; duplicates skip it entirely).
+        // In the simplified session flow processing is user-triggered, so no
+        // job is created here.
+        if (dupOf === null && !isSessionFlow) {
           await jobService.createJob(
             {
               batchId,
@@ -238,6 +250,7 @@ export class TranscriptionWorker {
       });
 
       await batchService.refreshBatchState(batchId);
+      await sessionsService.advanceStageIfTerminal(batchId);
     } catch (error) {
       await this.handleExecutionError(job, error);
     }
@@ -303,6 +316,7 @@ export class TranscriptionWorker {
       err: cause ?? errorCode,
     });
     await batchService.refreshBatchState(batchId);
+    await sessionsService.advanceStageIfTerminal(batchId);
   }
 
   /** Complete the job without a Gemini call when a valid transcript exists. */
@@ -316,6 +330,7 @@ export class TranscriptionWorker {
       await jobService.markCompleted(job.id, tx);
     });
     await batchService.refreshBatchState(batchId);
+    await sessionsService.advanceStageIfTerminal(batchId);
   }
 
   private async detectTranscriptDuplicate(normalizedHash: string, ownAudioId: number): Promise<number | null> {

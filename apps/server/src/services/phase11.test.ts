@@ -73,6 +73,14 @@ class MockContentGateway implements GeminiGatewayLike {
   async analyzeKnowledge(): Promise<{ analysis: KnowledgeAnalysis; usage: GeminiUsage; durationMs: number }> {
     return { analysis: { destinations: [], knowledge: [] }, usage: ZERO_USAGE, durationMs: 1 };
   }
+  async analyzeNotes(): Promise<never> {
+    throw new Error('not used in this test suite');
+  }
+
+  async compareNote(): Promise<never> {
+    throw new Error('not used in this test suite');
+  }
+
   async createEmbedding() {
     return { embedding: [0.1], usage: ZERO_USAGE, durationMs: 1 };
   }

@@ -422,6 +422,8 @@ export const batchStatuses = [
   'KNOWLEDGE_READY',
   'GENERATING_CONTENT',
   'COMPLETED',
+  'TRANSCRIBED',
+  'COMMITTED',
   'PARTIAL_FAILED',
   'FAILED',
   'CANCELLED',
@@ -444,7 +446,14 @@ export type AudioStatus = (typeof audioStatuses)[number];
 export const jobStatuses = ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED'] as const;
 export type JobStatus = (typeof jobStatuses)[number];
 
-export const jobTypes = ['TRANSCRIPTION', 'KNOWLEDGE_ANALYSIS', 'KNOWLEDGE_DELTA', 'KNOWLEDGE_RECONCILIATION', 'CONTENT_GENERATION'] as const;
+export const jobTypes = [
+  'TRANSCRIPTION',
+  'KNOWLEDGE_ANALYSIS',
+  'KNOWLEDGE_DELTA',
+  'KNOWLEDGE_RECONCILIATION',
+  'CONTENT_GENERATION',
+  'NOTE_EXTRACTION',
+] as const;
 export type JobType = (typeof jobTypes)[number];
 
 /** Extensions accepted for audio ingestion. */
@@ -1057,5 +1066,335 @@ export interface TranscriptKnowledgeInfo {
     status: KnowledgeStatus;
     canonicalText: string;
   }[];
+}
+
+// ---------------------------------------------------------------------------
+// Simplified product model — sessions, notes, voice reports & logs
+// ---------------------------------------------------------------------------
+
+/** User-facing stage of a processing session. */
+export const sessionStages = [
+  'UPLOAD',
+  'TRANSCRIBE',
+  'PROCESS',
+  'REVIEW',
+  'COMMITTED',
+] as const;
+export type SessionStage = (typeof sessionStages)[number];
+
+/** Role of a place mentioned in a conversation. Only DESTINATION creates a row. */
+export const noteDestinationRoles = [
+  'ORIGIN',
+  'DESTINATION',
+  'TRANSIT',
+  'COMPARISON',
+  'OTHER',
+] as const;
+export type NoteDestinationRole = (typeof noteDestinationRoles)[number];
+
+/** Proposed business action for one extracted note. */
+export const proposedNoteActions = [
+  'ADD',
+  'UPDATE',
+  'MARK_OUTDATED',
+  'NO_CHANGE',
+] as const;
+export type ProposedNoteAction = (typeof proposedNoteActions)[number];
+
+export const destinationNoteStatuses = ['CURRENT', 'OUTDATED'] as const;
+export type DestinationNoteStatus = (typeof destinationNoteStatuses)[number];
+
+export const destinationNoteLogEvents = [
+  'NOTE_ADDED',
+  'NOTE_UPDATED',
+  'NOTE_MARKED_OUTDATED',
+] as const;
+export type DestinationNoteLogEvent = (typeof destinationNoteLogEvents)[number];
+
+/** Four value kinds a conversation can yield. */
+export const noteKinds = [
+  'TOUR_INFO',
+  'DESTINATION_INFO',
+  'TRAVELER_GUIDANCE',
+  'AUDIENCE_INSIGHT',
+] as const;
+export type NoteKind = (typeof noteKinds)[number];
+
+/** Scope of a factual destination note. */
+export const noteScopeTypes = ['DESTINATION', 'TOUR'] as const;
+export type NoteScopeType = (typeof noteScopeTypes)[number];
+
+/** Actions for audience insight proposals (dedup/merge, never hard delete). */
+export const insightProposalActions = ['ADD', 'MERGE', 'NO_CHANGE'] as const;
+export type InsightProposalAction = (typeof insightProposalActions)[number];
+
+export const audienceInsightStatuses = ['CURRENT', 'OUTDATED'] as const;
+export type AudienceInsightStatus = (typeof audienceInsightStatuses)[number];
+
+/**
+ * Structured output of one processing Gemini call: a whole-voice report plus
+ * a small set of genuinely useful notes (quality over quantity).
+ */
+export const noteExtractionSchema = z.object({
+  voiceReport: z.string().default(''),
+  conversationTopic: z.string().default(''),
+  notes: z
+    .array(
+      z.object({
+        title: z.string().min(1, 'عنوان نکته نمی‌تواند خالی باشد.'),
+        description: z.string().min(1, 'توضیح نکته نمی‌تواند خالی باشد.'),
+        destination: z.object({
+          name: z.string().min(1),
+          role: z.enum(noteDestinationRoles, { message: 'نقش مقصد نامعتبر است.' }).default('DESTINATION'),
+        }),
+        relevantDate: z.string().nullable().default(null),
+        kind: z.enum(['TOUR_INFO', 'DESTINATION_INFO', 'TRAVELER_GUIDANCE'], { message: 'نوع نکته نامعتبر است.' }).default('DESTINATION_INFO'),
+        scopeType: z.enum(noteScopeTypes, { message: 'دامنه نکته نامعتبر است.' }).default('DESTINATION'),
+        tourSubject: z.string().nullable().default(null),
+      }),
+    )
+    .default([]),
+  audienceInsights: z
+    .array(
+      z.object({
+        title: z.string().min(1, 'عنوان Insight نمی‌تواند خالی باشد.'),
+        description: z.string().min(1, 'توضیح Insight نمی‌تواند خالی باشد.'),
+        destination: z.object({
+          name: z.string().min(1),
+          role: z.enum(noteDestinationRoles, { message: 'نقش مقصد نامعتبر است.' }).default('DESTINATION'),
+        }),
+        inferenceBasis: z.string().min(1, 'مبنای استنباط نمی‌تواند خالی باشد.'),
+        confidence: z.number().min(0).max(1).default(0.5),
+        contentOpportunity: z
+          .object({
+            title: z.string().min(1),
+            reason: z.string().min(1),
+          })
+          .nullable()
+          .default(null),
+      }),
+    )
+    .default([]),
+});
+
+export type NoteExtraction = z.infer<typeof noteExtractionSchema>;
+
+/**
+ * Result of processing one voice. Only ACTIONABLE notes reach the review UI;
+ * NO_CHANGE proposals are committed silently (source link only) and never
+ * rendered as cards.
+ */
+export const processingResultStatuses = [
+  'ACTIONABLE',
+  'NO_USEFUL_KNOWLEDGE',
+  'NO_NEW_KNOWLEDGE',
+] as const;
+export type ProcessingResultStatus = (typeof processingResultStatuses)[number];
+
+/** One extracted note as returned to the UI (no technical metadata). */
+export interface ExtractedNote {
+  id: number;
+  destinationId: number | null;
+  destinationName: string | null;
+  title: string;
+  description: string;
+  relevantDate: string | null;
+  proposedAction: ProposedNoteAction;
+  matchedNoteId: number | null;
+  kind: NoteKind;
+  scopeType: NoteScopeType;
+  tourSubject: string | null;
+}
+
+/** A processed voice: clean report + its actionable notes. */
+export interface ProcessedVoice {
+  audioId: number;
+  fileName: string;
+  report: string | null;
+  conversationTopic: string | null;
+  resultStatus: ProcessingResultStatus;
+  hasTranscript: boolean;
+  notes: ExtractedNote[];
+}
+
+/** Audio file as exposed by a session (no absolute path / hashes / job ids). */
+export interface SessionAudioItem {
+  id: number;
+  fileName: string;
+  size: number;
+  /** registered | duplicate | queued | transcribing | transcribed | failed */
+  status: AudioStatus;
+  hasTranscript: boolean;
+  /** Simple user-facing queue state. */
+  queueState: 'در صف' | 'در حال انجام' | 'تکمیل شد' | 'خطا' | 'تکراری' | null;
+}
+
+export interface SessionSummary {
+  id: number;
+  stage: SessionStage;
+  createdAt: string;
+  totalAudio: number;
+  transcribed: number;
+  processed: number;
+  /** Real destinations the processing engine identified (deduplicated, no origins). */
+  destinations: { id: number; name: string }[];
+}
+
+/**
+ * Stage-specific derived state for the workflow UI. Backend-computed from real
+ * job/audio state so the UI never loads a button off a generic batch status.
+ */
+export interface SessionDerivedState {
+  isTranscribing: boolean;
+  transcriptionFinished: boolean;
+  canStartProcessing: boolean;
+  isKnowledgeProcessing: boolean;
+  knowledgeProcessingFinished: boolean;
+  canApplyToDatabase: boolean;
+}
+
+export interface SessionDetail extends SessionSummary {
+  audio: SessionAudioItem[];
+  voices: ProcessedVoice[];
+  /** Destinations grouped per proposed action, for the review summary. */
+  commitSummary: CommitSummary;
+  /** Per-destination newsroom narrative (survives restart, shown pre-apply). */
+  newsroom: ProcessingNewsDestination[];
+  derived: SessionDerivedState;
+}
+
+export interface CommitSummaryDestination {
+  destinationId: number | null;
+  destinationName: string | null;
+  addCount: number;
+  updateCount: number;
+  outdatedCount: number;
+  noChangeCount: number;
+}
+
+export interface CommitSummary {
+  destinations: CommitSummaryDestination[];
+  /** Actionable proposals only (ADD + UPDATE + MARK_OUTDATED). */
+  totalProposals: number;
+  /** Total NO_CHANGE proposals across the whole session. */
+  noChangeCount: number;
+  /** Actionable audience insights (ADD + MERGE) across the whole session. */
+  insightCount: number;
+}
+
+export interface CommitResponse {
+  sessionId: number;
+  applied: number;
+  destinations: { id: number; name: string }[];
+}
+
+/** Clean transcript of one audio (only user-facing fields). */
+export interface CleanTranscriptResponse {
+  audioId: number;
+  audioName: string;
+  processedAt: string | null;
+  segments: { sequence: number; speaker: string | null; text: string }[];
+  text: string;
+}
+
+/** One destination note in the user-facing database. */
+export interface DestinationNoteItem {
+  id: number;
+  title: string;
+  description: string;
+  status: DestinationNoteStatus;
+  relevantDate: string | null;
+  firstObservedAt: string;
+  lastUpdatedAt: string;
+  sourceCount: number;
+  kind: NoteKind;
+  scopeType: NoteScopeType;
+  tourSubject: string | null;
+}
+
+/** One inferred audience insight in the user-facing destination database. */
+export interface AudienceInsightItem {
+  id: number;
+  title: string;
+  description: string;
+  inferenceBasis: string;
+  confidence: number;
+  contentOpportunityTitle: string | null;
+  contentOpportunityReason: string | null;
+  status: AudienceInsightStatus;
+  firstObservedAt: string;
+  lastUpdatedAt: string;
+  sourceCount: number;
+}
+
+/** One editorial newsroom story (an H2 headline + full paragraphs). */
+export interface NewsroomStory {
+  headline: string;
+  paragraphs: string[];
+}
+
+/** One per-destination newsroom narrative of a processing session. */
+export interface ProcessingNewsDestination {
+  destinationId: number;
+  destinationName: string;
+  /** Plain fallback text (deterministic "no news" or config-missing summary). */
+  content: string;
+  /** Structured editorial stories produced by the reporter (empty for fallbacks). */
+  stories: NewsroomStory[];
+}
+
+/**
+ * One source voice of a destination, grouped by transcript (one audio =
+ * one transcript). A voice appears once even when it sources many notes.
+ */
+export interface DestinationNoteSourceItem {
+  audioId: number | null;
+  transcriptId: number;
+  fileName: string;
+  processedAt: string;
+  transcriptAvailable: boolean;
+  noteCount: number;
+}
+
+export interface DestinationNoteLogItem {
+  id: number;
+  eventType: DestinationNoteLogEvent;
+  noteId: number | null;
+  noteTitle: string | null;
+  reason: string | null;
+  sourceAudioIds: number[];
+  createdAt: string;
+}
+
+export interface DestinationNoteListResponse {
+  destinationId: number;
+  canonicalName: string;
+  notes: DestinationNoteItem[];
+  insights: AudienceInsightItem[];
+  sources: DestinationNoteSourceItem[];
+  logs: DestinationNoteLogItem[];
+}
+
+/** Full extracted notes of one source voice for one destination (source detail). */
+export interface DestinationSourceVoiceNotesResponse {
+  destinationId: number;
+  transcriptId: number;
+  fileName: string;
+  processedAt: string;
+  notes: {
+    title: string;
+    description: string;
+    relevantDate: string | null;
+    status: DestinationNoteStatus;
+  }[];
+}
+
+/** Simplified destination list row. */
+export interface DestinationListItem {
+  id: number;
+  canonicalName: string;
+  currentNoteCount: number;
+  outdatedNoteCount: number;
+  lastUpdatedAt: string | null;
 }
 

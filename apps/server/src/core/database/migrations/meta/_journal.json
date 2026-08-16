@@ -71,6 +71,41 @@
       "when": 1786867702228,
       "tag": "0009_lowly_tag",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1786898808616,
+      "tag": "0010_elite_blackheart",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1786903382597,
+      "tag": "0011_powerful_giant_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1786904484463,
+      "tag": "0012_known_ironclad",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1786908267642,
+      "tag": "0013_lyrical_sumo",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1786912872140,
+      "tag": "0014_woozy_warbound",
+      "breakpoints": true
     }
   ]
 }

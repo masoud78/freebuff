@@ -120,6 +120,14 @@ class MockDeltaGateway implements GeminiGatewayLike {
     return { analysis: this.analysis, usage: ZERO_USAGE, durationMs: 20 };
   }
 
+  async analyzeNotes(): Promise<never> {
+    throw new Error('not used in this test suite');
+  }
+
+  async compareNote(): Promise<never> {
+    throw new Error('not used in this test suite');
+  }
+
   async createEmbedding() {
     this.embedCalls += 1;
     if (this.mode === 'rate-limit' || this.mode === 'embed-rate-limit' || this.mode === 'api-error') {

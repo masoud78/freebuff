@@ -84,6 +84,14 @@ class MockGateway implements GeminiGatewayLike {
     };
   }
 
+  async analyzeNotes(): Promise<never> {
+    throw new Error('not used in this test suite');
+  }
+
+  async compareNote(): Promise<never> {
+    throw new Error('not used in this test suite');
+  }
+
   async createEmbedding() {
     this.calls += 1;
     if (this.behavior === 'rate-limit') {

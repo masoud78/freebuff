@@ -1,0 +1,1 @@
+ALTER TABLE `processing_destination_news` ADD `stories_json` text;

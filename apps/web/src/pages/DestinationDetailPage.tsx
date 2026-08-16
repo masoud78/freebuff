@@ -1,121 +1,78 @@
-import { ArrowRight, MapPin, RefreshCw, Search, X } from 'lucide-react';
+import { FileAudio, History, Lightbulb, RefreshCw, StickyNote, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
-import type {
-  DestinationContentHistoryResponse,
-  DestinationDetailResponse,
-  KnowledgeChangeInfo,
-  KnowledgeConflictInfo,
-  KnowledgeType,
-  MasterKnowledgeItem,
-} from '@freebuff/contracts';
+import { useNavigate, useParams } from 'react-router-dom';
+import type { DestinationNoteListResponse } from '@freebuff/contracts';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ErrorState } from '../components/ErrorState';
 import { LoadingState } from '../components/LoadingState';
 import { PageHeader } from '../components/PageHeader';
-import { SectionCard } from '../components/SectionCard';
-import { StatusBadge, type StatusTone } from '../components/StatusBadge';
-import { KnowledgeDetailDrawer } from '../features/knowledge/KnowledgeDetailDrawer';
-import {
-  fetchDestination,
-  fetchDestinationChanges,
-  fetchDestinationConflicts,
-  fetchDestinationContentHistory,
-  fetchMasterKnowledge,
-  resolveConflict,
-} from '../lib/api';
+import { SourceVoiceDetailModal } from '../components/SourceVoiceDetailModal';
+import { formatJalaliDate, formatJalaliDateTime } from '../lib/format';
+import { deleteDestination, fetchDestinationNoteDetail, fetchSourceVoiceNotes, fetchTranscriptById } from '../lib/api';
 
-const STATUS_TONE: Record<DestinationDetailResponse['status'], StatusTone> = {
-  PROVISIONAL: 'warning',
-  CONFIRMED: 'success',
-  MERGED: 'neutral',
+type Tab = 'notes' | 'insights' | 'sources' | 'logs';
+type Filter = 'CURRENT' | 'OUTDATED' | 'ALL';
+
+const KIND_LABEL: Record<string, string> = {
+  TOUR_INFO: 'تور',
+  DESTINATION_INFO: 'مقصد',
+  TRAVELER_GUIDANCE: 'راهنمای مسافر',
 };
 
-const TYPE_LABEL: Record<DestinationDetailResponse['type'], string> = {
-  CITY: 'شهر',
-  COUNTRY: 'کشور',
-  REGION: 'منطقه',
-  OTHER: 'سایر',
+const FILTER_LABEL: Record<Filter, string> = {
+  CURRENT: 'فعال',
+  OUTDATED: 'قدیمی',
+  ALL: 'همه',
 };
 
-const KNOWLEDGE_TYPE_LABEL: Record<KnowledgeType, string> = {
-  FACT: 'واقعیت',
-  CUSTOMER_QUESTION: 'سوال مشتری',
-  CUSTOMER_OBJECTION: 'اعتراض مشتری',
-  CUSTOMER_NEED: 'نیاز مشتری',
-  SALES_INSIGHT: 'بینش فروش',
-  RECOMMENDATION: 'پیشنهاد',
-  OTHER: 'سایر',
+const EVENT_LABEL: Record<string, string> = {
+  NOTE_ADDED: 'نکته جدید اضافه شد',
+  NOTE_UPDATED: 'نکته بروزرسانی شد',
+  NOTE_MARKED_OUTDATED: 'نکته قدیمی شد',
 };
 
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString('fa-IR', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
-}
-
-function confidenceLabel(confidence: number): string {
-  const pct = Math.round(confidence * 100);
-  return `${pct}%`;
-}
+const formatDate = formatJalaliDate;
+const formatDateTime = formatJalaliDateTime;
 
 export function DestinationDetailPage() {
   const { id } = useParams<{ id: string }>();
   const destinationId = Number(id);
-  const [destination, setDestination] = useState<DestinationDetailResponse | null>(null);
-  const [masterItems, setMasterItems] = useState<MasterKnowledgeItem[]>([]);
-  const [masterTotal, setMasterTotal] = useState(0);
-  const [changes, setChanges] = useState<KnowledgeChangeInfo[]>([]);
-  const [conflicts, setConflicts] = useState<KnowledgeConflictInfo[]>([]);
-  const [contentHistory, setContentHistory] = useState<DestinationContentHistoryResponse | null>(null);
-  const [selectedKnowledgeId, setSelectedKnowledgeId] = useState<number | null>(null);
+  const navigate = useNavigate();
+  const [tab, setTab] = useState<Tab>('notes');
+  const [filter, setFilter] = useState<Filter>('CURRENT');
+  const [detail, setDetail] = useState<DestinationNoteListResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [search, setSearch] = useState('');
-  const [typeFilter, setTypeFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-  const [isMasterLoading, setIsMasterLoading] = useState(false);
-  const [conflictActionId, setConflictActionId] = useState<number | null>(null);
+  const [sourceDetail, setSourceDetail] = useState<{ transcriptId: number; fileName: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
-  const loadMaster = useCallback(async (q = '', type = '', status = '') => {
-    setIsMasterLoading(true);
-    try {
-      const master = await fetchMasterKnowledge(destinationId, 100, 0, {
-        q: q || undefined,
-        knowledgeType: type || undefined,
-        status: status || undefined,
-      });
-      setMasterItems(master.items);
-      setMasterTotal(master.total);
-    } catch {
-      // Silent — the page-level error already covers initial load failures.
-    } finally {
-      setIsMasterLoading(false);
-    }
-  }, [destinationId]);
+  const load = useCallback(
+    async (status: Filter) => {
+      setIsLoading(true);
+      setLoadError(null);
+      try {
+        const result = await fetchDestinationNoteDetail(destinationId, status);
+        setDetail(result);
+      } catch (error) {
+        setLoadError(error instanceof Error ? error.message : 'خطا در دریافت مقصد.');
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [destinationId],
+  );
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([
-      fetchDestination(destinationId),
-      fetchMasterKnowledge(destinationId, 100),
-      fetchDestinationChanges(destinationId),
-      fetchDestinationConflicts(destinationId),
-      fetchDestinationContentHistory(destinationId),
-    ])
-      .then(([dest, master, changeRes, conflictRes, historyRes]) => {
+    fetchDestinationNoteDetail(destinationId, 'CURRENT')
+      .then((result) => {
         if (cancelled) return;
-        setDestination(dest);
-        setMasterItems(master.items);
-        setMasterTotal(master.total);
-        setChanges(changeRes.changes);
-        setConflicts(conflictRes.conflicts);
-        setContentHistory(historyRes);
+        setDetail(result);
       })
       .catch((error: unknown) => {
-        if (!cancelled)
-          setLoadError(error instanceof Error ? error.message : 'خطا در دریافت مقصد.');
+        if (cancelled) return;
+        setLoadError(error instanceof Error ? error.message : 'خطا در دریافت مقصد.');
       })
       .finally(() => {
         if (!cancelled) setIsLoading(false);
@@ -125,65 +82,35 @@ export function DestinationDetailPage() {
     };
   }, [destinationId]);
 
-  const retry = useCallback(() => {
-    setIsLoading(true);
-    setLoadError(null);
-    Promise.all([
-      fetchDestination(destinationId),
-      fetchMasterKnowledge(destinationId, 100),
-      fetchDestinationChanges(destinationId),
-      fetchDestinationConflicts(destinationId),
-      fetchDestinationContentHistory(destinationId),
-    ])
-      .then(([dest, master, changeRes, conflictRes, historyRes]) => {
-        setDestination(dest);
-        setMasterItems(master.items);
-        setMasterTotal(master.total);
-        setChanges(changeRes.changes);
-        setConflicts(conflictRes.conflicts);
-        setContentHistory(historyRes);
-      })
-      .catch((error: unknown) => {
-        setLoadError(error instanceof Error ? error.message : 'خطا در دریافت مقصد.');
-      })
-      .finally(() => setIsLoading(false));
-  }, [destinationId]);
+  const changeFilter = (next: Filter) => {
+    setFilter(next);
+    void load(next);
+  };
 
-  // Debounced master-knowledge search (never a Gemini call).
-  useEffect(() => {
-    if (isLoading) return;
-    const timer = window.setTimeout(() => {
-      void loadMaster(search, typeFilter, statusFilter);
-    }, 300);
-    return () => window.clearTimeout(timer);
-  }, [search, typeFilter, statusFilter, isLoading, loadMaster]);
-
-  const dismissConflict = async (conflictId: number) => {
-    setConflictActionId(conflictId);
+  const handleDelete = async () => {
+    setDeleting(true);
     try {
-      await resolveConflict(conflictId, 'DISMISS', 'رد دستی توسط کاربر');
-      const updated = await fetchDestinationConflicts(destinationId);
-      setConflicts(updated.conflicts);
+      await deleteDestination(destinationId);
+      navigate('/destinations');
     } catch (error) {
-      // Surface a light inline error via the page state.
-      setLoadError(error instanceof Error ? error.message : 'رد تعارض با خطا مواجه شد.');
+      setLoadError(error instanceof Error ? error.message : 'حذف مقصد ممکن نشد.');
+      setConfirmDelete(false);
     } finally {
-      setConflictActionId(null);
+      setDeleting(false);
     }
   };
 
-  if (isLoading) {
+  if (isLoading && !detail) {
     return <LoadingState label="در حال دریافت مقصد…" />;
   }
-
-  if (loadError || !destination) {
+  if (loadError || !detail) {
     return (
       <ErrorState
-        message={loadError ?? 'مقصد پیدا نشد.'}
+        message={loadError ?? 'مقصد در دسترس نیست.'}
         action={
           <button
             type="button"
-            onClick={retry}
+            onClick={() => void load(filter)}
             className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-muted"
           >
             <RefreshCw className="size-3.5" aria-hidden="true" />
@@ -197,372 +124,215 @@ export function DestinationDetailPage() {
   return (
     <>
       <PageHeader
-        title={
-          <span className="inline-flex items-center gap-3">
-            <Link
-              to="/destinations"
-              className="inline-flex items-center gap-1 text-sm font-normal text-text-secondary transition-colors hover:text-text-primary"
-            >
-              <ArrowRight className="size-4" aria-hidden="true" />
-              مقصدها
-            </Link>
-            <span>{destination.canonicalName}</span>
-          </span>
+        title={detail.canonicalName}
+        description="نکات کاربردی، ویس‌های منبع و تاریخچه تغییرات"
+        actions={
+          <button
+            type="button"
+            onClick={() => setConfirmDelete(true)}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface px-3 py-2 text-sm text-text-secondary transition-colors hover:bg-surface-muted hover:text-text-primary"
+          >
+            <Trash2 className="size-4" aria-hidden="true" />
+            حذف مقصد
+          </button>
         }
-        description={`${TYPE_LABEL[destination.type]} · اولین مشاهده: ${
-          destination.firstSeenBatchId ? `Batch #${destination.firstSeenBatchId}` : '—'
-        }`}
       />
 
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-center gap-4 text-xs text-text-secondary">
-          <StatusBadge tone={STATUS_TONE[destination.status]} label={destination.status} />
-          <span>
-            دانش: <strong className="text-text-primary">{destination.knowledgeCount}</strong>
-          </span>
-          <span>
-            Transcript منبع:{' '}
-            <strong className="text-text-primary">{destination.sourceTranscriptCount}</strong>
-          </span>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex gap-1 rounded-md border border-border bg-surface p-1">
+          {(
+            [
+              ['notes', 'نکات', StickyNote],
+              ['insights', 'دغدغه‌ها و محتوا', Lightbulb],
+              ['sources', 'ویس‌های منبع', FileAudio],
+              ['logs', 'لاگ تغییرات', History],
+            ] as const
+          ).map(([key, label, Icon]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setTab(key)}
+              className={`inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm transition-colors ${
+                tab === key ? 'bg-accent-muted font-medium text-accent' : 'text-text-secondary hover:text-text-primary'
+              }`}
+            >
+              <Icon className="size-4" aria-hidden="true" />
+              {label}
+            </button>
+          ))}
         </div>
 
-        {destination.aliases.length > 0 && (
-          <SectionCard
-            title="Aliasها"
-            description="نام‌های دیگر این مقصد که به‌صورت خودکار شناسایی شده‌اند"
-            icon={<MapPin className="size-4" />}
-          >
-            <div className="flex flex-wrap gap-2">
-              {destination.aliases.map((alias) => (
-                <span
-                  key={alias}
-                  dir="ltr"
-                  className="rounded-md border border-border bg-surface-muted px-2.5 py-1 text-xs text-text-primary"
-                >
-                  {alias}
-                </span>
-              ))}
-            </div>
-          </SectionCard>
-        )}
-
-        <SectionCard
-          title="Master Knowledge"
-          description={`${masterTotal} مورد دانش نهایی و معتبر این مقصد — برای مشاهده نسخه‌ها و شواهد کلیک کنید`}
-        >
-          <div className="mb-4 flex flex-wrap items-center gap-2">
-            <div className="relative min-w-0 flex-1">
-              <Search className="pointer-events-none absolute start-2.5 top-1/2 size-3.5 -translate-y-1/2 text-text-muted" aria-hidden="true" />
-              <input
-                type="search"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="جستجو در دانش…"
-                className="w-full rounded-md border border-border bg-surface py-1.5 pe-8 ps-8 text-sm text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-                aria-label="جستجو در دانش"
-              />
-              {search && (
-                <button
-                  type="button"
-                  onClick={() => setSearch('')}
-                  className="absolute end-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-primary"
-                  aria-label="پاک کردن جستجو"
-                >
-                  <X className="size-3.5" aria-hidden="true" />
-                </button>
-              )}
-            </div>
-            <select
-              value={typeFilter}
-              onChange={(event) => setTypeFilter(event.target.value)}
-              className="rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs text-text-primary focus:border-accent focus:outline-none"
-              aria-label="فیلتر نوع دانش"
-            >
-              <option value="">همهٔ انواع</option>
-              {(Object.keys(KNOWLEDGE_TYPE_LABEL) as KnowledgeType[]).map((type) => (
-                <option key={type} value={type}>
-                  {KNOWLEDGE_TYPE_LABEL[type]}
-                </option>
-              ))}
-            </select>
-            <select
-              value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value)}
-              className="rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs text-text-primary focus:border-accent focus:outline-none"
-              aria-label="فیلتر وضعیت"
-            >
-              <option value="">همهٔ وضعیت‌ها</option>
-              <option value="ACTIVE">ACTIVE</option>
-              <option value="PROVISIONAL">PROVISIONAL</option>
-              <option value="ARCHIVED">ARCHIVED</option>
-            </select>
-            {isMasterLoading && (
-              <span className="text-xs text-text-muted" role="status">
-                در حال جستجو…
-              </span>
-            )}
+        {tab === 'notes' && (
+          <div className="flex gap-1 rounded-md border border-border bg-surface p-1">
+            {(['CURRENT', 'OUTDATED', 'ALL'] as const).map((key) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => changeFilter(key)}
+                className={`rounded px-3 py-1.5 text-xs transition-colors ${
+                  filter === key ? 'bg-accent-muted font-medium text-accent' : 'text-text-secondary hover:text-text-primary'
+                }`}
+              >
+                {FILTER_LABEL[key]}
+              </button>
+            ))}
           </div>
-          {masterItems.length === 0 ? (
-            <p className="py-6 text-center text-sm text-text-secondary">
-              هنوز دانش نهایی (Reconciled) برای این مقصد وجود ندارد.
+        )}
+      </div>
+
+      {tab === 'notes' && (
+        <div className="space-y-6">
+          {detail.notes.length === 0 ? (
+            <p className="py-10 text-center text-sm text-text-secondary">هنوز نکته‌ای ثبت نشده است.</p>
+          ) : (
+            detail.notes.map((note) => (
+              <article key={note.id} className="border-b border-border pb-6 last:border-b-0">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-lg font-bold leading-8 text-text-primary">{note.title}</h2>
+                    {KIND_LABEL[note.kind] && (
+                      <span className="rounded-full border border-border bg-surface-muted px-2.5 py-0.5 text-xs text-text-muted">
+                        {KIND_LABEL[note.kind]}
+                      </span>
+                    )}
+                  </div>
+                  {note.status === 'OUTDATED' && (
+                    <span className="shrink-0 rounded-full border border-border bg-surface-muted px-2.5 py-0.5 text-xs text-text-muted">
+                      قدیمی
+                    </span>
+                  )}
+                </div>
+                <p className="mt-2 max-w-prose whitespace-pre-wrap text-[15px] leading-8 text-text-primary">
+                  {note.description}
+                </p>
+                <p className="mt-3 text-xs text-text-muted">
+                  {note.relevantDate && <>مرتبط با: {note.relevantDate} · </>}
+                  {note.tourSubject && <>تور: {note.tourSubject} · </>}
+                  آخرین بروزرسانی: {formatDate(note.lastUpdatedAt)}
+                  {note.sourceCount > 0 && <> · {note.sourceCount} منبع</>}
+                </p>
+              </article>
+            ))
+          )}
+        </div>
+      )}
+
+      {tab === 'insights' && (
+        <div className="space-y-6">
+          {detail.insights.length === 0 ? (
+            <p className="py-10 text-center text-sm text-text-secondary">
+              هنوز دغدغه یا فرصت محتوایی ثبت نشده است.
             </p>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-start text-sm">
-                <thead>
-                  <tr className="border-b border-border text-xs text-text-secondary">
-                    <th className="px-3 py-2 text-start font-medium">نوع</th>
-                    <th className="px-3 py-2 text-start font-medium">موجودیت</th>
-                    <th className="px-3 py-2 text-start font-medium">ویژگی</th>
-                    <th className="px-3 py-2 text-start font-medium">مقدار فعلی</th>
-                    <th className="px-3 py-2 text-start font-medium">شواهد</th>
-                    <th className="px-3 py-2 text-start font-medium">اولین دیده</th>
-                    <th className="px-3 py-2 text-start font-medium">آخرین دیده</th>
-                    <th className="px-3 py-2 text-start font-medium">وضعیت</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {masterItems.map((item) => (
-                    <tr
-                      key={item.id}
-                      className="cursor-pointer transition-colors hover:bg-surface-muted/50"
-                      onClick={() => setSelectedKnowledgeId(item.id)}
-                    >
-                      <td className="px-3 py-2.5 text-text-primary">
-                        {KNOWLEDGE_TYPE_LABEL[item.knowledgeType]}
-                      </td>
-                      <td className="px-3 py-2.5 text-text-primary">{item.entityName ?? '—'}</td>
-                      <td className="px-3 py-2.5 text-text-primary">{item.attribute ?? '—'}</td>
-                      <td className="px-3 py-2.5 text-text-primary">
-                        {item.currentValue}
-                        {item.unit && <span className="text-xs text-text-muted"> {item.unit}</span>}
-                      </td>
-                      <td className="px-3 py-2.5 text-text-secondary">{item.evidenceCount}</td>
-                      <td className="px-3 py-2.5 text-xs text-text-secondary">
-                        {item.firstSeenAt ? formatDate(item.firstSeenAt) : '—'}
-                        {item.firstSeenBatchId ? ` (B${item.firstSeenBatchId})` : ''}
-                      </td>
-                      <td className="px-3 py-2.5 text-xs text-text-secondary">
-                        {item.lastSeenAt ? formatDate(item.lastSeenAt) : '—'}
-                        {item.lastSeenBatchId ? ` (B${item.lastSeenBatchId})` : ''}
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <StatusBadge
-                          tone={item.status === 'ACTIVE' ? 'success' : item.status === 'PROVISIONAL' ? 'warning' : 'neutral'}
-                          label={item.status}
-                        />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            detail.insights.map((insight) => (
+              <article key={insight.id} className="border-b border-border pb-6 last:border-b-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-lg font-bold leading-8 text-text-primary">{insight.title}</h2>
+                  <span className="rounded-full border border-border bg-surface-muted px-2.5 py-0.5 text-xs text-text-muted">
+                    دغدغه و محتوا
+                  </span>
+                </div>
+                <p className="mt-2 max-w-prose whitespace-pre-wrap text-[15px] leading-8 text-text-primary">
+                  {insight.description}
+                </p>
+                {insight.contentOpportunityTitle && (
+                  <div className="mt-3 rounded-md border border-border bg-surface-muted/40 px-4 py-3">
+                    <p className="text-xs font-semibold text-text-secondary">فرصت محتوا</p>
+                    <p className="mt-1 text-sm font-medium text-text-primary">{insight.contentOpportunityTitle}</p>
+                    {insight.contentOpportunityReason && (
+                      <p className="mt-1 text-sm leading-7 text-text-secondary">
+                        {insight.contentOpportunityReason}
+                      </p>
+                    )}
+                  </div>
+                )}
+                <p className="mt-3 text-xs text-text-muted">
+                  آخرین بروزرسانی: {formatDate(insight.lastUpdatedAt)}
+                  {insight.sourceCount > 0 && <> · {insight.sourceCount} منبع</>}
+                </p>
+              </article>
+            ))
           )}
-        </SectionCard>
+        </div>
+      )}
 
-        <SectionCard
-          title="تغییرات اخیر"
-          description="تغییرات Publishable (NEW/UPDATE) این مقصد"
-        >
-          {changes.length === 0 ? (
-            <p className="py-6 text-center text-sm text-text-secondary">تغییری ثبت نشده است.</p>
+      {tab === 'sources' && (
+        <div className="overflow-hidden rounded-lg border border-border bg-surface shadow-card">
+          {detail.sources.length === 0 ? (
+            <p className="py-10 text-center text-sm text-text-secondary">هنوز ویس منبعی ثبت نشده است.</p>
           ) : (
             <ul className="divide-y divide-border">
-              {changes.slice(0, 10).map((change) => (
-                <li key={change.id} className="flex items-center justify-between gap-4 py-3">
+              {detail.sources.map((source) => (
+                <li key={source.transcriptId} className="flex items-center justify-between gap-4 px-5 py-3">
                   <div className="min-w-0">
-                    <p className="truncate text-sm text-text-primary">{change.canonicalText}</p>
-                    <p className="text-xs text-text-muted">
-                      {change.changeType === 'NEW' ? (
-                        <span className="text-emerald-600">جدید</span>
-                      ) : (
-                        <span className="text-amber-600">
-                          به‌روزرسانی: {change.oldValue ?? '—'} ← {change.newValue ?? '—'}
-                        </span>
-                      )}
+                    <p className="truncate text-sm text-text-primary" dir="ltr">
+                      {source.fileName}
+                    </p>
+                    <p className="mt-0.5 text-xs text-text-muted">
+                      {formatDate(source.processedAt)}
+                      {source.noteCount > 0 && <> · {source.noteCount} نکته از این ویس</>}
                     </p>
                   </div>
                   <button
                     type="button"
-                    className="shrink-0 rounded-md border border-border px-2.5 py-1 text-xs text-text-primary hover:bg-surface-muted"
-                    onClick={() => setSelectedKnowledgeId(change.knowledgeId)}
+                    onClick={() =>
+                      setSourceDetail({ transcriptId: source.transcriptId, fileName: source.fileName })
+                    }
+                    className="rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-muted"
                   >
-                    مشاهده
+                    جزئیات و متن کامل
                   </button>
                 </li>
               ))}
             </ul>
           )}
-        </SectionCard>
+        </div>
+      )}
 
-        <SectionCard
-          title="Generated Content"
-          description="تاریخچهٔ محتوای تولیدشده از دانش جدید/به‌روزشدهٔ هر Batch"
-        >
-          {contentHistory === null || contentHistory.batches.length === 0 ? (
-            <p className="py-6 text-center text-sm text-text-secondary">
-              هنوز محتوایی برای این مقصد تولید نشده است.
-            </p>
+      {tab === 'logs' && (
+        <div className="space-y-0">
+          {detail.logs.length === 0 ? (
+            <p className="py-10 text-center text-sm text-text-secondary">هنوز تغییری ثبت نشده است.</p>
           ) : (
-            <ul className="divide-y divide-border">
-              {contentHistory.batches.map((batch) => (
-                <li key={batch.batchId} className="py-3">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-text-primary" dir="ltr">
-                        Batch #{batch.batchId}
-                      </p>
-                      <p className="mt-0.5 text-xs text-text-muted">
-                        {batch.generations.length} نسخه · آخرین:{' '}
-                        {batch.generations[0] ? formatDate(batch.generations[0].createdAt) : '—'}
-                      </p>
-                    </div>
-                    <Link
-                      to={`/batches/${batch.batchId}`}
-                      className="shrink-0 rounded-md border border-border px-2.5 py-1 text-xs text-text-primary hover:bg-surface-muted"
-                    >
-                      مشاهده محتوا
-                    </Link>
-                  </div>
-                  <p className="mt-2 whitespace-pre-wrap rounded-md bg-surface-muted px-3 py-2 text-xs leading-relaxed text-text-secondary" dir="auto">
-                    {batch.generations[batch.generations.length - 1]?.content.slice(0, 220)}
-                    {(batch.generations[batch.generations.length - 1]?.content.length ?? 0) > 220 ? '…' : ''}
-                  </p>
-                </li>
-              ))}
-            </ul>
+            detail.logs.map((log) => (
+              <div key={log.id} className="relative border-s border-border ps-5 pb-6 last:pb-0">
+                <span className="absolute -start-1 top-1.5 size-2 rounded-full bg-border-strong" aria-hidden="true" />
+                <p className="text-sm font-medium text-text-primary">
+                  {formatDateTime(log.createdAt)}
+                  {log.noteTitle && <> — {log.noteTitle}</>}
+                </p>
+                <p className="mt-1 text-xs text-text-secondary">{EVENT_LABEL[log.eventType] ?? log.eventType}</p>
+                {log.reason && <p className="mt-2 text-sm leading-7 text-text-primary">دلیل: {log.reason}</p>}
+              </div>
+            ))
           )}
-        </SectionCard>
+        </div>
+      )}
 
-        <SectionCard
-          title="تعارضات"
-          description="ادعاهای متناقضی که به‌صورت خودکار جایگزین نشده‌اند"
-        >
-          {conflicts.length === 0 ? (
-            <p className="py-6 text-center text-sm text-text-secondary">تعارضی ثبت نشده است.</p>
-          ) : (
-            <ul className="divide-y divide-border">
-              {conflicts.map((conflict) => (
-                <li key={conflict.id} className="py-3">
-                  <div className="flex items-center justify-between gap-4">
-                    <p className="text-sm text-text-primary" dir="auto">
-                      {conflict.candidateCanonicalText}
-                    </p>
-                    <div className="flex shrink-0 items-center gap-2">
-                      {conflict.status === 'OPEN' && (
-                        <button
-                          type="button"
-                          onClick={() => void dismissConflict(conflict.id)}
-                          disabled={conflictActionId === conflict.id}
-                          className="rounded-md border border-border px-2.5 py-1 text-xs text-text-primary transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          {conflictActionId === conflict.id ? 'در حال رد…' : 'رد این تعارض'}
-                        </button>
-                      )}
-                      <StatusBadge
-                        tone={conflict.status === 'OPEN' ? 'danger' : conflict.status === 'RESOLVED' ? 'success' : 'neutral'}
-                        label={conflict.status}
-                      />
-                    </div>
-                  </div>
-                  <p className="mt-1 text-xs text-text-muted">
-                    {conflict.existingValue !== null && (
-                      <span>ارزش موجود: {conflict.existingValue} · </span>
-                    )}
-                    ارزش ادعا: {conflict.candidateValue ?? '—'} · {formatDate(conflict.createdAt)}
-                  </p>
-                </li>
-              ))}
-            </ul>
-          )}
-        </SectionCard>
+      {sourceDetail && (
+        <SourceVoiceDetailModal
+          destinationId={destinationId}
+          transcriptId={sourceDetail.transcriptId}
+          fileName={sourceDetail.fileName}
+          loadTranscript={() => fetchTranscriptById(sourceDetail.transcriptId)}
+          loadNotes={() => fetchSourceVoiceNotes(destinationId, sourceDetail.transcriptId)}
+          onClose={() => setSourceDetail(null)}
+        />
+      )}
 
-        <SectionCard
-          title="دانش استخراج‌شده"
-          description={`${destination.knowledge.length} مورد دانش برای این مقصد`}
-        >
-          {destination.knowledge.length === 0 ? (
-            <p className="py-6 text-center text-sm text-text-secondary">
-              هنوز دانشی برای این مقصد استخراج نشده است.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-start text-sm">
-                <thead>
-                  <tr className="border-b border-border text-xs text-text-secondary">
-                    <th className="px-3 py-2 text-start font-medium">نوع</th>
-                    <th className="px-3 py-2 text-start font-medium">موجودیت</th>
-                    <th className="px-3 py-2 text-start font-medium">ویژگی</th>
-                    <th className="px-3 py-2 text-start font-medium">مقدار فعلی</th>
-                    <th className="px-3 py-2 text-start font-medium">اطمینان</th>
-                    <th className="px-3 py-2 text-start font-medium">منبع</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {destination.knowledge.map((item) => (
-                    <tr key={item.id}>
-                      <td className="px-3 py-2.5 text-text-primary">
-                        {KNOWLEDGE_TYPE_LABEL[item.knowledgeType]}
-                      </td>
-                      <td className="px-3 py-2.5 text-text-primary">
-                        {item.entityName ?? '—'}
-                        {item.entityType && (
-                          <span className="text-xs text-text-muted"> ({item.entityType})</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2.5 text-text-primary">{item.attribute ?? '—'}</td>
-                      <td className="px-3 py-2.5 text-text-primary">
-                        {item.currentValue}
-                        {item.unit && (
-                          <span className="text-xs text-text-muted"> {item.unit}</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2.5 text-text-primary">{confidenceLabel(item.confidence)}</td>
-                      <td className="px-3 py-2.5 text-text-secondary">{item.sourceCount} منبع</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </SectionCard>
-
-        <SectionCard
-          title="Transcriptهای منبع"
-          description="مکالماتی که این مقصد در آن‌ها شناسایی شده است"
-        >
-          {destination.sources.length === 0 ? (
-            <p className="py-6 text-center text-sm text-text-secondary">منبعی ثبت نشده است.</p>
-          ) : (
-            <ul className="divide-y divide-border">
-              {destination.sources.map((source) => (
-                <li key={source.transcriptId} className="flex items-center justify-between gap-4 py-3">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm text-text-primary" dir="ltr">
-                      {source.audioName}
-                    </p>
-                    <p className="text-xs text-text-muted">
-                      Batch #{source.batchId} · {formatDate(source.analyzedAt)}
-                    </p>
-                  </div>
-                  <Link
-                    to={`/batches/${source.batchId}`}
-                    className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-muted"
-                  >
-                    مشاهده Batch
-                    <ArrowRight className="size-3.5" aria-hidden="true" />
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </SectionCard>
-      </div>
-
-      {selectedKnowledgeId !== null && (
-        <KnowledgeDetailDrawer
-          knowledgeId={selectedKnowledgeId}
-          onClose={() => setSelectedKnowledgeId(null)}
+      {confirmDelete && (
+        <ConfirmDialog
+          title="حذف مقصد"
+          description={
+            <>
+              مقصد <strong className="text-text-primary">«{detail.canonicalName}»</strong> و همهٔ نکات، دغدغه‌ها،
+              نسخه‌ها و لاگ‌های آن برای همیشه حذف می‌شوند. فایل‌های صوتی و متن‌های منبع حذف نمی‌شوند.
+            </>
+          }
+          confirmLabel="حذف مقصد"
+          busy={deleting}
+          onConfirm={() => void handleDelete()}
+          onCancel={() => setConfirmDelete(false)}
         />
       )}
     </>
