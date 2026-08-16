@@ -6,30 +6,14 @@ dist/
 .vite/
 coverage/
 
-# Environment files (never commit any env file)
-.env
-.env.*
-!.env.example
-
-# Local database (workspace/system/database/)
-workspace/system/database/
-
-# Local secrets (Gemini API key — never committed)
-workspace/system/secrets/
-
-# User audio files (large, private — never committed)
-workspace/audio/
+# Personal overrides (never committed)
+.env.local
 
 # Stray debug workspaces under apps (never committed)
 apps/**/workspace/
 
-# Freebuff tooling & preview state
+# Freebuff tooling & preview state (regenerated locally — not project data)
 .freebuff/
-
-# SQLite artifacts
-*.db
-*.db-shm
-*.db-wal
 
 # Logs
 *.log
