@@ -91,6 +91,10 @@ test('create batch', async () => {
     reconcileRunning: 0,
     reconcileCompleted: 0,
     reconcileFailed: 0,
+    contentPending: 0,
+    contentGenerating: 0,
+    contentGenerated: 0,
+    contentFailed: 0,
   });
 });
 

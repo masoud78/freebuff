@@ -18,8 +18,10 @@ import {
   fetchDestination,
   fetchDestinationChanges,
   fetchDestinationConflicts,
+  fetchDestinationContentHistory,
   fetchMasterKnowledge,
 } from '../lib/api';
+import type { DestinationContentHistoryResponse } from '@freebuff/contracts';
 
 const STATUS_TONE: Record<DestinationDetailResponse['status'], StatusTone> = {
   PROVISIONAL: 'warning',
@@ -65,6 +67,7 @@ export function DestinationDetailPage() {
   const [masterTotal, setMasterTotal] = useState(0);
   const [changes, setChanges] = useState<KnowledgeChangeInfo[]>([]);
   const [conflicts, setConflicts] = useState<KnowledgeConflictInfo[]>([]);
+  const [contentHistory, setContentHistory] = useState<DestinationContentHistoryResponse | null>(null);
   const [selectedKnowledgeId, setSelectedKnowledgeId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -76,14 +79,16 @@ export function DestinationDetailPage() {
       fetchMasterKnowledge(destinationId, 100),
       fetchDestinationChanges(destinationId),
       fetchDestinationConflicts(destinationId),
+      fetchDestinationContentHistory(destinationId),
     ])
-      .then(([dest, master, changeRes, conflictRes]) => {
+      .then(([dest, master, changeRes, conflictRes, historyRes]) => {
         if (cancelled) return;
         setDestination(dest);
         setMasterItems(master.items);
         setMasterTotal(master.total);
         setChanges(changeRes.changes);
         setConflicts(conflictRes.conflicts);
+        setContentHistory(historyRes);
       })
       .catch((error: unknown) => {
         if (!cancelled)
@@ -105,13 +110,15 @@ export function DestinationDetailPage() {
       fetchMasterKnowledge(destinationId, 100),
       fetchDestinationChanges(destinationId),
       fetchDestinationConflicts(destinationId),
+      fetchDestinationContentHistory(destinationId),
     ])
-      .then(([dest, master, changeRes, conflictRes]) => {
+      .then(([dest, master, changeRes, conflictRes, historyRes]) => {
         setDestination(dest);
         setMasterItems(master.items);
         setMasterTotal(master.total);
         setChanges(changeRes.changes);
         setConflicts(conflictRes.conflicts);
+        setContentHistory(historyRes);
       })
       .catch((error: unknown) => {
         setLoadError(error instanceof Error ? error.message : 'خطا در دریافت مقصد.');
@@ -284,6 +291,45 @@ export function DestinationDetailPage() {
                   >
                     مشاهده
                   </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </SectionCard>
+
+        <SectionCard
+          title="Generated Content"
+          description="تاریخچهٔ محتوای تولیدشده از دانش جدید/به‌روزشدهٔ هر Batch"
+        >
+          {contentHistory === null || contentHistory.batches.length === 0 ? (
+            <p className="py-6 text-center text-sm text-text-secondary">
+              هنوز محتوایی برای این مقصد تولید نشده است.
+            </p>
+          ) : (
+            <ul className="divide-y divide-border">
+              {contentHistory.batches.map((batch) => (
+                <li key={batch.batchId} className="py-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-text-primary" dir="ltr">
+                        Batch #{batch.batchId}
+                      </p>
+                      <p className="mt-0.5 text-xs text-text-muted">
+                        {batch.generations.length} نسخه · آخرین:{' '}
+                        {batch.generations[0] ? formatDate(batch.generations[0].createdAt) : '—'}
+                      </p>
+                    </div>
+                    <Link
+                      to={`/batches/${batch.batchId}`}
+                      className="shrink-0 rounded-md border border-border px-2.5 py-1 text-xs text-text-primary hover:bg-surface-muted"
+                    >
+                      مشاهده محتوا
+                    </Link>
+                  </div>
+                  <p className="mt-2 whitespace-pre-wrap rounded-md bg-surface-muted px-3 py-2 text-xs leading-relaxed text-text-secondary" dir="auto">
+                    {batch.generations[batch.generations.length - 1]?.content.slice(0, 220)}
+                    {(batch.generations[batch.generations.length - 1]?.content.length ?? 0) > 220 ? '…' : ''}
+                  </p>
                 </li>
               ))}
             </ul>

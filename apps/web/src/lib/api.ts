@@ -6,10 +6,14 @@ import type {
   BatchDeltaResponse,
   BatchDetailResponse,
   BatchDestinationSummaryInfo,
+  BatchGeneratedContentsResponse,
   BatchListResponse,
   BatchSummary,
+  BatchUsageResponse,
   CandidateRetrievalDebugResponse,
+  ContentRegenerateResponse,
   DestinationConflictsResponse,
+  DestinationContentHistoryResponse,
   DestinationDetailResponse,
   DestinationListResponse,
   DestinationMasterKnowledgeResponse,
@@ -320,4 +324,65 @@ export function finalizeBatch(batchId: number): Promise<{ batchId: number; final
     `${API_BASE_URL}/api/batches/${batchId}/finalize`,
     { method: 'POST' },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Generated content, usage & optimization (Phase 11)
+// ---------------------------------------------------------------------------
+
+/** Generated contents of a batch, grouped per destination. */
+export function fetchBatchGeneratedContents(batchId: number): Promise<BatchGeneratedContentsResponse> {
+  return request<BatchGeneratedContentsResponse>(
+    `${API_BASE_URL}/api/batches/${batchId}/generated-contents`,
+  );
+}
+
+/** Generated content history of a destination, grouped per batch. */
+export function fetchDestinationContentHistory(
+  destinationId: number,
+): Promise<DestinationContentHistoryResponse> {
+  return request<DestinationContentHistoryResponse>(
+    `${API_BASE_URL}/api/destinations/${destinationId}/generated-contents`,
+  );
+}
+
+/** Full generated content detail with source knowledge links. */
+export function fetchGeneratedContentDetail(contentId: number): Promise<{
+  id: number;
+  batchId: number;
+  destinationId: number | null;
+  destinationName: string | null;
+  content: string;
+  modelId: string;
+  promptVersionId: number;
+  generationNumber: number;
+  status: string;
+  deltaSignature: string;
+  knowledgeCount: number;
+  createdAt: string;
+  knowledge: {
+    generatedContentId: number;
+    knowledgeId: number;
+    knowledgeVersionId: number;
+    changeId: number;
+    changeType: string;
+    canonicalText: string;
+    currentValue: string | null;
+    oldValue: string | null;
+  }[];
+}> {
+  return request(`${API_BASE_URL}/api/generated-contents/${contentId}`);
+}
+
+/** Queue an explicit regeneration (history preserved). */
+export function regenerateContent(contentId: number): Promise<ContentRegenerateResponse> {
+  return request<ContentRegenerateResponse>(
+    `${API_BASE_URL}/api/generated-contents/${contentId}/regenerate`,
+    { method: 'POST' },
+  );
+}
+
+/** Per-stage token/usage aggregate of a batch (real api_usage data). */
+export function fetchBatchUsage(batchId: number): Promise<BatchUsageResponse> {
+  return request<BatchUsageResponse>(`${API_BASE_URL}/api/batches/${batchId}/usage`);
 }

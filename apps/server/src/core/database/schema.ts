@@ -224,6 +224,8 @@ export const apiUsage = sqliteTable('api_usage', {
   batchId: integer('batch_id'),
   jobId: integer('job_id'),
   audioId: integer('audio_id'),
+  /** Destination-scoped stage (e.g. CONTENT generations). Null when N/A. */
+  destinationId: integer('destination_id'),
   stage: text('stage').notNull(),
   modelId: text('model_id'),
   inputTokens: integer('input_tokens'),
@@ -640,3 +642,67 @@ export const batchDestinationSummaries = sqliteTable(
 
 export type BatchDestinationSummaryRow = typeof batchDestinationSummaries.$inferSelect;
 export type NewBatchDestinationSummaryRow = typeof batchDestinationSummaries.$inferInsert;
+
+/**
+ * One generated content (Phase 11). A row per (batch, destination,
+ * generation) — regenerate keeps history, never overwrites. SUPERSEDED marks
+ * older generations once a newer one exists.
+ */
+export const generatedContents = sqliteTable(
+  'generated_contents',
+  {
+    id: integer('id').primaryKey(),
+    batchId: integer('batch_id').notNull(),
+    destinationId: integer('destination_id').references(() => destinations.id),
+    content: text('content').notNull(),
+    modelId: text('model_id').notNull(),
+    promptVersionId: integer('prompt_version_id').notNull(),
+    /** Stable backend-computed hash of the publishable delta + config. */
+    deltaSignature: text('delta_signature').notNull(),
+    generationNumber: integer('generation_number').notNull().default(1),
+    status: text('status').notNull().default('GENERATED'), // GENERATED | FAILED | SUPERSEDED
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    // One generation per (batch, destination, generation number) — retry/replay safe.
+    uniqueIndex('generated_contents_batch_dest_gen_unique_idx').on(
+      table.batchId,
+      table.destinationId,
+      table.generationNumber,
+    ),
+    index('generated_contents_batch_idx').on(table.batchId),
+    index('generated_contents_destination_idx').on(table.destinationId),
+  ],
+);
+
+export type GeneratedContentRow = typeof generatedContents.$inferSelect;
+export type NewGeneratedContentRow = typeof generatedContents.$inferInsert;
+
+/** Traceability: exactly which knowledge versions a content was built from. */
+export const generatedContentKnowledge = sqliteTable(
+  'generated_content_knowledge',
+  {
+    id: integer('id').primaryKey(),
+    generatedContentId: integer('generated_content_id')
+      .notNull()
+      .references(() => generatedContents.id),
+    knowledgeId: integer('knowledge_id')
+      .notNull()
+      .references(() => knowledgeItems.id),
+    knowledgeVersionId: integer('knowledge_version_id')
+      .notNull()
+      .references(() => knowledgeVersions.id),
+    changeId: integer('change_id')
+      .notNull()
+      .references(() => knowledgeChanges.id),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('generated_content_knowledge_unique_idx').on(table.generatedContentId, table.changeId),
+    index('generated_content_knowledge_knowledge_idx').on(table.knowledgeId),
+  ],
+);
+
+export type GeneratedContentKnowledgeRow = typeof generatedContentKnowledge.$inferSelect;
+export type NewGeneratedContentKnowledgeRow = typeof generatedContentKnowledge.$inferInsert;

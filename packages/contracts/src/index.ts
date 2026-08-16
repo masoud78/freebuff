@@ -117,6 +117,19 @@ export const reconciliationErrorCodes = [
 
 export type ReconciliationErrorCode = (typeof reconciliationErrorCodes)[number];
 
+export const contentErrorCodes = [
+  'CONTENT_MODEL_NOT_CONFIGURED',
+  'CONTENT_PROMPT_NOT_CONFIGURED',
+  'CONTENT_DELTA_EMPTY',
+  'CONTENT_INPUT_TOO_LARGE',
+  'CONTENT_GENERATION_FAILED',
+  'CONTENT_EMPTY_RESPONSE',
+  'CONTENT_SAVE_FAILED',
+  'CONTENT_TRACEABILITY_FAILED',
+] as const;
+
+export type ContentErrorCode = (typeof contentErrorCodes)[number];
+
 export const apiErrorCodes = [
   ...settingsErrorCodes,
   ...geminiErrorCodes,
@@ -128,6 +141,7 @@ export const apiErrorCodes = [
   ...knowledgeErrorCodes,
   ...deltaErrorCodes,
   ...reconciliationErrorCodes,
+  ...contentErrorCodes,
 ] as const;
 
 export type ApiErrorCode = (typeof apiErrorCodes)[number];
@@ -298,6 +312,7 @@ export const batchStatuses = [
   'RECONCILING',
   'ANALYSIS_COMPLETED',
   'KNOWLEDGE_READY',
+  'GENERATING_CONTENT',
   'COMPLETED',
   'PARTIAL_FAILED',
   'FAILED',
@@ -321,7 +336,7 @@ export type AudioStatus = (typeof audioStatuses)[number];
 export const jobStatuses = ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED'] as const;
 export type JobStatus = (typeof jobStatuses)[number];
 
-export const jobTypes = ['TRANSCRIPTION', 'KNOWLEDGE_ANALYSIS', 'KNOWLEDGE_DELTA', 'KNOWLEDGE_RECONCILIATION'] as const;
+export const jobTypes = ['TRANSCRIPTION', 'KNOWLEDGE_ANALYSIS', 'KNOWLEDGE_DELTA', 'KNOWLEDGE_RECONCILIATION', 'CONTENT_GENERATION'] as const;
 export type JobType = (typeof jobTypes)[number];
 
 /** Extensions accepted for audio ingestion. */
@@ -374,6 +389,14 @@ export interface BatchStats {
   reconcileCompleted: number;
   /** KNOWLEDGE_RECONCILIATION jobs failed. */
   reconcileFailed: number;
+  /** CONTENT_GENERATION jobs waiting to run. */
+  contentPending: number;
+  /** CONTENT_GENERATION jobs currently generating. */
+  contentGenerating: number;
+  /** CONTENT_GENERATION jobs completed. */
+  contentGenerated: number;
+  /** CONTENT_GENERATION jobs failed. */
+  contentFailed: number;
 }
 
 export interface BatchSummary {
@@ -422,7 +445,7 @@ export interface ScanResult {
 export const transcriptStatuses = ['COMPLETED', 'FAILED'] as const;
 export type TranscriptStatus = (typeof transcriptStatuses)[number];
 
-export const apiUsageStages = ['TRANSCRIPTION', 'KNOWLEDGE', 'EMBEDDING'] as const;
+export const apiUsageStages = ['TRANSCRIPTION', 'KNOWLEDGE', 'EMBEDDING', 'CONTENT'] as const;
 export type ApiUsageStage = (typeof apiUsageStages)[number];
 
 export const apiUsageStatuses = ['SUCCESS', 'FAILED'] as const;
@@ -596,11 +619,14 @@ export const deltaClassificationSchema = z.object({
 
 export type DeltaClassification = z.infer<typeof deltaClassificationSchema>;
 
-/** Stable metric keys for token/API savings (Phase 11 will surface them). */
+/** Stable metric keys for token/API savings (Phase 11 surfaces them in the UI). */
 export const deltaMetricKeys = [
   'exact_confirmation_count',
   'embedding_cache_hit_count',
   'delta_ai_call_skipped_count',
+  'destinations_no_publishable_delta_count',
+  'content_generation_call_count',
+  'content_generation_reuse_count',
 ] as const;
 export type DeltaMetricKey = (typeof deltaMetricKeys)[number];
 
@@ -779,6 +805,8 @@ export interface BatchDeltaItem {
   versionId: number;
   canonicalText: string;
   currentValue: string | null;
+  /** Previous value for UPDATE changes (context only — never the current fact). */
+  oldValue: string | null;
   unit: string | null;
   entityName: string | null;
   attribute: string | null;
@@ -795,6 +823,91 @@ export interface BatchDeltaResponse {
   batchId: number;
   destinations: BatchDestinationDelta[];
 }
+
+// ---------------------------------------------------------------------------
+// Generated content (Phase 11)
+// ---------------------------------------------------------------------------
+
+export const generatedContentStatuses = ['GENERATED', 'FAILED', 'SUPERSEDED'] as const;
+export type GeneratedContentStatus = (typeof generatedContentStatuses)[number];
+
+/** One content generation (a version/attempt for one batch+destination). */
+export interface GeneratedContentInfo {
+  id: number;
+  batchId: number;
+  destinationId: number | null;
+  destinationName: string | null;
+  content: string;
+  modelId: string;
+  promptVersionId: number;
+  generationNumber: number;
+  status: GeneratedContentStatus;
+  deltaSignature: string;
+  knowledgeCount: number;
+  createdAt: string;
+}
+
+/** One knowledge item a generated content is based on (traceability). */
+export interface GeneratedContentKnowledgeLink {
+  generatedContentId: number;
+  knowledgeId: number;
+  knowledgeVersionId: number;
+  changeId: number;
+  changeType: KnowledgeChangeType;
+  canonicalText: string;
+  currentValue: string | null;
+  oldValue: string | null;
+}
+
+export interface GeneratedContentDetailResponse extends GeneratedContentInfo {
+  knowledge: GeneratedContentKnowledgeLink[];
+}
+
+/** Generations grouped per destination for a batch (UI). */
+export interface BatchGeneratedContentDestination {
+  destinationId: number | null;
+  destinationName: string | null;
+  generations: GeneratedContentInfo[];
+  /** True when the destination existed in the batch but had no publishable delta. */
+  noPublishableDelta: boolean;
+}
+
+export interface BatchGeneratedContentsResponse {
+  batchId: number;
+  destinations: BatchGeneratedContentDestination[];
+}
+
+/** History grouped per batch for a destination (UI). */
+export interface DestinationContentHistoryResponse {
+  destinationId: number;
+  batches: {
+    batchId: number;
+    generations: GeneratedContentInfo[];
+  }[];
+}
+
+export interface ContentRegenerateRequest {
+  /** Optional: force regeneration even when the same generation exists. */
+  force?: boolean;
+}
+
+export interface ContentRegenerateResponse {
+  destinationId: number;
+  generationNumber: number;
+  queued: boolean;
+}
+
+/** Per-stage usage aggregate of a batch (from real api_usage data). */
+export interface UsageStageSummary {
+  calls: number;
+  failedCalls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  totalTokens: number;
+}
+
+export type BatchUsageResponse = Partial<Record<ApiUsageStage, UsageStageSummary>>;
 
 export interface TranscriptKnowledgeInfo {
   destinations: {

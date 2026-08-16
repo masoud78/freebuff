@@ -2,6 +2,8 @@ import { eq, sql } from 'drizzle-orm';
 import { getDatabase } from '../../core/database/client.js';
 import { batches, jobs } from '../../core/database/schema.js';
 import { batchDeltaService } from './batch-delta.service.js';
+import { batchContentGenerationService } from '../content/batch-content-generation.service.js';
+import { batchService } from '../batches.service.js';
 
 const PROCESSING_JOB_TYPES = ['TRANSCRIPTION', 'KNOWLEDGE_ANALYSIS', 'KNOWLEDGE_DELTA', 'KNOWLEDGE_RECONCILIATION'] as const;
 
@@ -74,11 +76,30 @@ export class BatchFinalizationService {
     }
 
     const { failed } = await this.terminalJobCounts(batchId);
-    const status = failed > 0 ? 'PARTIAL_FAILED' : 'KNOWLEDGE_READY';
-    await db
-      .update(batches)
-      .set({ status, completedAt: new Date(), updatedAt: new Date() })
-      .where(eq(batches.id, batchId));
+    if (failed > 0) {
+      await db
+        .update(batches)
+        .set({ status: 'PARTIAL_FAILED', completedAt: new Date(), updatedAt: new Date() })
+        .where(eq(batches.id, batchId));
+      return true;
+    }
+
+    // Phase 11: queue CONTENT_GENERATION jobs for destinations with a
+    // publishable delta. No delta anywhere → the batch completes directly
+    // with zero content Gemini calls.
+    const contentJobs = await batchContentGenerationService.ensureContentJobs(batchId);
+    if (contentJobs > 0) {
+      await db
+        .update(batches)
+        .set({ status: 'KNOWLEDGE_READY', completedAt: null, updatedAt: new Date() })
+        .where(eq(batches.id, batchId));
+      await batchService.refreshBatchState(batchId);
+    } else {
+      await db
+        .update(batches)
+        .set({ status: 'COMPLETED', completedAt: new Date(), updatedAt: new Date() })
+        .where(eq(batches.id, batchId));
+    }
     return true;
   }
 }

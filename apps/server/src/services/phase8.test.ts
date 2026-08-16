@@ -135,6 +135,18 @@ class MockGateway implements GeminiGatewayLike {
       durationMs: 9,
     };
   }
+
+  async generateContent() {
+    this.calls += 1;
+    if (this.behavior === 'rate-limit') {
+      throw new GeminiGatewayError('GEMINI_RATE_LIMIT', 'محدودیت نرخ');
+    }
+    return {
+      text: 'محتوا',
+      usage: { inputTokens: 3, outputTokens: 5, cachedTokens: 0, totalTokens: 8 },
+      durationMs: 10,
+    };
+  }
 }
 
 let dir: string;

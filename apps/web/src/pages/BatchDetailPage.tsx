@@ -9,6 +9,7 @@ import { StatusBadge, type StatusTone } from '../components/StatusBadge';
 import type { AudioStatus, BatchStatus } from '@freebuff/contracts';
 import { useBatch } from '../features/batches/useBatch';
 import { BatchDeltaSection } from '../features/knowledge/BatchDeltaSection';
+import { BatchGeneratedContentSection } from '../features/knowledge/BatchGeneratedContentSection';
 import { KnowledgeDecisionsSection } from '../features/knowledge/KnowledgeDecisionsSection';
 import { TranscriptModal } from '../features/transcripts/TranscriptModal';
 
@@ -23,6 +24,7 @@ const BATCH_TONE: Record<BatchStatus, StatusTone> = {
   RECONCILING: 'warning',
   ANALYSIS_COMPLETED: 'success',
   KNOWLEDGE_READY: 'success',
+  GENERATING_CONTENT: 'warning',
   COMPLETED: 'success',
   PARTIAL_FAILED: 'warning',
   FAILED: 'danger',
@@ -218,6 +220,13 @@ export function BatchDetailPage() {
           <Stat label="ناموفق" value={stats.reconcileFailed} />
         </div>
 
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <Stat label="Content در صف" value={stats.contentPending} />
+          <Stat label="در حال تولید" value={stats.contentGenerating} />
+          <Stat label="تولید شده" value={stats.contentGenerated} />
+          <Stat label="ناموفق" value={stats.contentFailed} />
+        </div>
+
         {processable > 0 && (
           <SectionCard title="پیشرفت پردازش" description={`${done} از ${processable} فایل قابل پردازش تکمیل شده`}>
             <div className="flex items-center gap-4">
@@ -237,6 +246,8 @@ export function BatchDetailPage() {
         <KnowledgeDecisionsSection batchId={batchId} stats={stats} />
 
         <BatchDeltaSection batchId={batchId} />
+
+        <BatchGeneratedContentSection batchId={batchId} />
 
         <SectionCard
           title="فایل‌های صوتی"

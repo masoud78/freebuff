@@ -141,6 +141,13 @@ class MockDeltaGateway implements GeminiGatewayLike {
     }
     return { classification, usage: ZERO_USAGE, durationMs: 9 };
   }
+
+  async generateContent() {
+    if (this.mode === 'rate-limit' || this.mode === 'api-error') {
+      throw new GeminiGatewayError('GEMINI_RATE_LIMIT', 'محدودیت نرخ');
+    }
+    return { text: 'محتوا', usage: ZERO_USAGE, durationMs: 10 };
+  }
 }
 
 let dir: string;

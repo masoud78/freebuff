@@ -57,6 +57,13 @@
       "when": 1786861214995,
       "tag": "0007_previous_wolfpack",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1786863117772,
+      "tag": "0008_far_shaman",
+      "breakpoints": true
     }
   ]
 }

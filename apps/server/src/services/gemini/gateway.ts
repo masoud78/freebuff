@@ -505,6 +505,49 @@ export class GeminiGateway {
       });
     }
   }
+
+  /**
+   * Generate batch-delta content (Phase 11). Plain-text output — the user's
+   * CONTENT_GENERATION system prompt controls style, length and structure.
+   * Stateless: system prompt + destination + current batch delta only.
+   */
+  async generateContent(input: {
+    apiKey: string;
+    modelId: string;
+    systemPrompt: string;
+    userText: string;
+  }): Promise<{ text: string; usage: GeminiUsage; durationMs: number }> {
+    const ai = new GoogleGenAI({ apiKey: input.apiKey });
+    const started = Date.now();
+    try {
+      const response = await ai.models.generateContent({
+        model: input.modelId,
+        contents: [{ role: 'user', parts: [{ text: input.userText }] }],
+        config: {
+          systemInstruction: { role: 'system', parts: [{ text: input.systemPrompt }] },
+        },
+      });
+      const text = response.text ?? '';
+      if (text.trim().length === 0) {
+        throw new GeminiGatewayError('GEMINI_API_ERROR', 'تولید محتوا خروجی خالی برگرداند.', {
+          durationMs: Date.now() - started,
+        });
+      }
+      return {
+        text,
+        usage: normalizeUsage(response.usageMetadata),
+        durationMs: Date.now() - started,
+      };
+    } catch (error) {
+      if (error instanceof GeminiGatewayError) throw error;
+      const normalized = toGeminiGatewayError(error);
+      throw new GeminiGatewayError(normalized.code as GeminiErrorCode, normalized.message, {
+        cause: normalized.cause,
+        retryable: normalized.retryable,
+        durationMs: Date.now() - started,
+      });
+    }
+  }
 }
 
 export const geminiGateway = new GeminiGateway();
@@ -518,4 +561,5 @@ export type GeminiGatewayLike = Pick<
   | 'analyzeKnowledge'
   | 'createEmbedding'
   | 'classifyDelta'
+  | 'generateContent'
 >;

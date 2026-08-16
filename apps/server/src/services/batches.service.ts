@@ -80,6 +80,12 @@ async function computeStats(batchId: number): Promise<BatchStats> {
   const reconcileCompleted = await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_RECONCILIATION', 'COMPLETED');
   const reconcileFailed = await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_RECONCILIATION', 'FAILED');
 
+  // Content phase: CONTENT_GENERATION jobs (Phase 11).
+  const contentPending = await jobService.countByTypeStatus(batchId, 'CONTENT_GENERATION', 'PENDING');
+  const contentGenerating = await jobService.countByTypeStatus(batchId, 'CONTENT_GENERATION', 'RUNNING');
+  const contentGenerated = await jobService.countByTypeStatus(batchId, 'CONTENT_GENERATION', 'COMPLETED');
+  const contentFailed = await jobService.countByTypeStatus(batchId, 'CONTENT_GENERATION', 'FAILED');
+
   return {
     totalAudio: Number(totalAudio?.count ?? 0),
     newAudio: (await countBy('QUEUED')) + (await countBy('REGISTERED')) + (await countBy('TRANSCRIBING')) + (await countBy('TRANSCRIBED')),
@@ -104,6 +110,10 @@ async function computeStats(batchId: number): Promise<BatchStats> {
     reconcileRunning,
     reconcileCompleted,
     reconcileFailed,
+    contentPending,
+    contentGenerating,
+    contentGenerated,
+    contentFailed,
   };
 }
 
@@ -157,6 +167,10 @@ export class BatchService {
           reconcileRunning: 0,
           reconcileCompleted: 0,
           reconcileFailed: 0,
+          contentPending: 0,
+          contentGenerating: 0,
+          contentGenerated: 0,
+          contentFailed: 0,
         },
       );
     } catch (error) {
@@ -359,6 +373,13 @@ export class BatchService {
       failed: await jobService.countByTypeStatus(batchId, 'KNOWLEDGE_RECONCILIATION', 'FAILED'),
     };
     const reconcileTotal = reconcile.pending + reconcile.running + reconcile.completed + reconcile.failed;
+    const content = {
+      pending: await jobService.countByTypeStatus(batchId, 'CONTENT_GENERATION', 'PENDING'),
+      running: await jobService.countByTypeStatus(batchId, 'CONTENT_GENERATION', 'RUNNING'),
+      completed: await jobService.countByTypeStatus(batchId, 'CONTENT_GENERATION', 'COMPLETED'),
+      failed: await jobService.countByTypeStatus(batchId, 'CONTENT_GENERATION', 'FAILED'),
+    };
+    const contentTotal = content.pending + content.running + content.completed + content.failed;
 
     let status: BatchStatus;
     if (stats.newAudio === 0) {
@@ -366,17 +387,27 @@ export class BatchService {
       // permanently failed files (FAILED).
       status = stats.failedItems > 0 ? 'FAILED' : 'COMPLETED';
     } else if (counts.PENDING > 0 || counts.RUNNING > 0) {
-      // In progress — distinguish the active phase. Delta processing is its
-      // own phase so the UI can show "Comparing" while delta jobs run;
-      // reconciliation is its own phase on top.
+      // In progress — distinguish the active phase.
       if (delta.pending + delta.running > 0) {
         status = 'DELTA_PROCESSING';
       } else if (reconcile.pending + reconcile.running > 0) {
         status = 'RECONCILING';
+      } else if (content.pending + content.running > 0) {
+        status = 'GENERATING_CONTENT';
       } else if (knowledge.pending + knowledge.running > 0) {
         status = 'ANALYZING';
       } else {
         status = 'TRANSCRIBING';
+      }
+    } else if (contentTotal > 0) {
+      // Content phase is terminal. Clean run → COMPLETED (§36–37); any
+      // permanently failed content job makes the batch partial.
+      if (content.failed > 0) {
+        status = content.completed > 0 || reconcile.completed > 0 ? 'PARTIAL_FAILED' : 'FAILED';
+      } else if (stats.failedItems > 0 || counts.FAILED > 0) {
+        status = 'PARTIAL_FAILED';
+      } else {
+        status = 'COMPLETED';
       }
     } else if (reconcileTotal > 0) {
       // Reconciliation phase is terminal. Any failed job makes the batch

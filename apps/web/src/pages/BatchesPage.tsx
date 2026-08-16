@@ -19,6 +19,7 @@ const STATUS_TONE: Record<BatchStatus, StatusTone> = {
   RECONCILING: 'warning',
   ANALYSIS_COMPLETED: 'success',
   KNOWLEDGE_READY: 'success',
+  GENERATING_CONTENT: 'warning',
   COMPLETED: 'success',
   PARTIAL_FAILED: 'warning',
   FAILED: 'danger',

@@ -5,6 +5,7 @@ import type {
   KnowledgeChangeType,
 } from '@freebuff/contracts';
 import { and, eq, inArray, sql } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/sqlite-core';
 import { getDatabase } from '../../core/database/client.js';
 import {
   batchDestinationSummaries,
@@ -15,6 +16,8 @@ import {
   knowledgeItems,
   knowledgeVersions,
 } from '../../core/database/schema.js';
+
+const oldVersions = alias(knowledgeVersions, 'old_versions');
 
 /**
  * Batch Knowledge Delta (Phase 10): the publishable NEW/UPDATE master changes
@@ -41,10 +44,13 @@ export class BatchDeltaService {
         attribute: knowledgeItems.attribute,
         knowledgeType: knowledgeItems.knowledgeType,
         status: knowledgeItems.status,
+        // Previous value for UPDATE changes (context only, Phase 11 §13).
+        oldValue: oldVersions.valueText,
       })
       .from(knowledgeChanges)
       .innerJoin(knowledgeItems, eq(knowledgeItems.id, knowledgeChanges.knowledgeId))
       .innerJoin(knowledgeVersions, eq(knowledgeVersions.id, knowledgeChanges.newVersionId))
+      .leftJoin(oldVersions, eq(oldVersions.id, knowledgeChanges.oldVersionId))
       .where(
         and(
           eq(knowledgeChanges.batchId, batchId),
@@ -63,6 +69,7 @@ export class BatchDeltaService {
       versionId: row.versionId,
       canonicalText: row.canonicalText,
       currentValue: row.currentValue,
+      oldValue: row.oldValue,
       unit: row.unit,
       entityName: row.entityName,
       attribute: row.attribute,

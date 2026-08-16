@@ -97,6 +97,30 @@ Delta Decision → Reconciliation (Transactional) → Destination Master Knowled
 - **Batch Delta (`BatchDeltaService` + `BatchFinalizationService`):** فقط Master NEW/UPDATE با `status=ACTIVE` Publishable هستند (PROVISIONAL حذف، §45). Summaryها (`batch_destination_summaries`) از دادهٔ Canonical Recompute می‌شوند (Retry-safe؛ Rebuild خروجی یکسان می‌دهد). وقتی همهٔ Jobهای Batch (Transcription/Knowledge/Delta/Reconciliation) Terminal شوند، Summary بازسازی و Batch به `KNOWLEDGE_READY` (یا `PARTIAL_FAILED`) می‌رود.
 - **UI:** صفحهٔ Destination اکنون Master Knowledge واقعی (جدول Bounded با Status/First/Last Seen)، Recent Changes و Conflicts را با Knowledge Detail Drawer (نسخه‌ها + شواهد + تغییرات) نشان می‌دهد. صفحهٔ Batch ردیف Reconciliation و بخش «Batch Knowledge Delta» (خلاصهٔ هر Destination + لیست دقیق NEW/UPDATE) را دارد.
 
+## Batch Delta Content Generation (Phase 11)
+
+فاز ۱۱ آخرین حلقهٔ AI Pipeline است: بعد از اینکه همهٔ Jobهای یک Batch (Transcription/Knowledge/Delta/Reconciliation) Terminal شدند و Batch Delta Finalize شد، برای هر Destination با Delta Publishable یک محتوا تولید می‌شود — و فقط از دانش همان Batch:
+
+```text
+Batch Knowledge Delta → Gemini (CONTENT_GENERATION) → Generated Content
+```
+
+چهار مفهوم که نباید با هم اشتباه شوند:
+
+| مفهوم | معنی |
+|---|---|
+| **Master Knowledge** | دانش کامل و دائمی هر Destination (`knowledge_items` + نسخه‌ها + شواهد) |
+| **Batch Knowledge Delta** | فقط تغییرات Publishable (ACTIVE NEW/UPDATE) یک Batch برای یک Destination |
+| **Generated Batch Content** | محتوای تولیدشده از همان Delta — نه کل Destination |
+| **Delta Signature** | Hash پایدار (نسخه‌های مرتب Delta + Prompt Version + Model) برای Idempotency |
+
+- **ورودی Gemini:** فقط `CONTENT_GENERATION System Prompt کاربر` + `Internal Contract ضد-Hallucination` + `نام مقصد` + `Delta Publishable` (`ContentInputBuilder`). Master Knowledge کامل، Raw Transcript، Evidence Text، و موارد CONFIRMATION/CONFLICT/IGNORE/PROVISIONAL **هرگز** وارد Content نمی‌شوند. Previous Value فقط Context است — محتوا از Current Value نوشته می‌شود.
+- **Job و Worker:** برای هر `(batch, destination)` با Delta فقط یک Job اصلی `CONTENT_GENERATION` (`CONTENT:{batch}:{dest}:{gen}`). Batch از `KNOWLEDGE_READY` به `GENERATING_CONTENT` و سپس `COMPLETED` می‌رود؛ بدون Delta → بدون هیچ Gemini Call مستقیم `COMPLETED`. شکست نهایی Content → `PARTIAL_FAILED`.
+- **Idempotency و Regenerate:** `delta_signature` (Backend) جلوی Gemini Call دوم برای Delta یکسان را می‌گیرد (`content_generation_reuse_count`). Regenerate صریح کاربر نسخهٔ جدید (`generationNumber+1`) می‌سازد و نسخهٔ قبلی `SUPERSEDED` می‌شود — هیچ Overwrite مستقیمی.
+- **Traceability:** `generated_contents` (content + model_id + prompt_version_id + delta_signature + generation) و `generated_content_knowledge` (لینک دقیق به knowledge_version/change). هر محتوا دقیقاً مشخص است از کدام دانش‌ها ساخته شده.
+- **Usage و Optimization:** هر Call Content در `api_usage` با `stage=CONTENT` و `destination_id` ثبت می‌شود (توکن‌های واقعی SDK). UI Batch بخش‌های Usage (جمع Stage-based) و Optimization (فقط متریک‌های واقعی: Exact Confirmations، Cache Hits، Skips، مقصدهای بدون Delta، Calls، Reuse) را نشان می‌دهد — هیچ تخمین قیمتی.
+- **UI:** Batch Detail بخش «Generated Content» (نسخه‌ها، Copy، Regenerate، پیام «دانش جدید قابل انتشار پیدا نشد» برای مقصدهای بدون Delta) و Destination Detail بخش تاریخچهٔ Content به تفکیک Batch.
+
 ## خارج از محدوده فعلی
 
-عمداً ساخته نشده‌اند: Authentication، Docker، Redis، Microservices، Vector Database خارجی، Content Generation (فاز ۱۱+). زیرساخت لازم (GeminiGateway، model config، پرامپت‌ها، readiness، Batch/Job، Worker، Transcript، Candidates/Delta/Reconciliation/Batch Delta) آماده است.
+عمداً ساخته نشده‌اند: Authentication، Docker، Redis، Microservices، Vector Database خارجی، Pricing/Cost محاسباتی، و بازطراحی کلی. زیرساخت لازم (GeminiGateway، model config، پرامپت‌ها، readiness، Batch/Job، Worker، Transcript، Candidates/Delta/Reconciliation/Batch Delta/Content) آماده است.
