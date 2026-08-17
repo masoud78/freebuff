@@ -8,6 +8,7 @@ import { reconciliationWorker } from './services/knowledge/reconciliation.worker
 import { pipelineRecoveryService } from './services/pipeline-recovery.service.js';
 import { promptsService } from './services/prompts.service.js';
 import { settingsService } from './services/settings.service.js';
+import { setupOutboundProxy } from './services/net/proxy.js';
 import { transcriptionWorker } from './services/transcription/worker.js';
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -15,6 +16,14 @@ const HOST = process.env.HOST ?? '127.0.0.1';
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
 try {
+  // Route outbound traffic (Gemini API calls) through the system proxy if one
+  // is configured — env vars first, then the Windows system proxy.
+  const proxy = setupOutboundProxy();
+  if (proxy.enabled) {
+    console.log(`[proxy] enabled (${proxy.source}): ${proxy.url}`);
+  } else if (proxy.detail) {
+    console.log(`[proxy] disabled (${proxy.source}): ${proxy.detail}`);
+  }
   // Fail fast: if the database cannot be opened or migrated, do not start.
   await initDatabase();
   // Ensure default settings exist so the DB always has a settings row.
