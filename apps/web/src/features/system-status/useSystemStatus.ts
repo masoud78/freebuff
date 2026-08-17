@@ -18,25 +18,34 @@ function stateFromHealth(health: HealthResponse): SystemStatusState {
   };
 }
 
+const POLL_MS = 3000;
+
 export function useSystemStatus(): { status: SystemStatusState; retry: () => void } {
   const [status, setStatus] = useState<SystemStatusState>({
     backend: 'checking',
     database: 'checking',
   });
 
+  // Keep polling so the status goes online by itself the moment the backend
+  // and database come up — no manual refresh needed.
   useEffect(() => {
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
-    fetchHealth()
-      .then((health) => {
+    const check = async (): Promise<void> => {
+      try {
+        const health = await fetchHealth();
         if (!cancelled) setStatus(stateFromHealth(health));
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) setStatus(UNAVAILABLE_STATE);
-      });
+      }
+      if (!cancelled) timer = setTimeout(() => void check(), POLL_MS);
+    };
 
+    void check();
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, []);
 

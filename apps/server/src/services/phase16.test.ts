@@ -86,7 +86,7 @@ class NoteGateway implements GeminiGatewayLike {
   }
   async generateNewsroom(input: { apiKey: string; modelId: string; payload: NewsroomPayload }) {
     this.newsroomPayloads.push(input.payload);
-    return { stories: this.newsroomStories, usage: ZERO_USAGE, durationMs: 1 };
+    return { stories: this.newsroomStories, noNewsReason: null, usage: ZERO_USAGE, durationMs: 1 };
   }
 }
 
@@ -449,7 +449,7 @@ test('NO_CHANGE only → no fake stories, plain no-news text', async () => {
   const newsroom = await newsroomService.listForSession(second.sessionId);
   assert.equal(newsroom.length, 1);
   assert.equal(newsroom[0]?.stories.length, 0, 'no stories for NO_CHANGE only');
-  assert.ok(newsroom[0]?.content.includes('تازه یا تغییر معناداری'));
+  assert.ok(newsroom[0]?.content.includes('نکتهٔ جدیدی برای این مقصد ثبت نشد'));
 });
 
 test('multi-destination newsroom keeps each destination isolated in its payload', async () => {

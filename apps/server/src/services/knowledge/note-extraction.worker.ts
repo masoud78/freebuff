@@ -3,6 +3,7 @@ import { GeminiGatewayError, geminiGateway, type GeminiGatewayLike } from '../ge
 import { DomainError } from '../errors.js';
 import { jobService } from '../jobs.service.js';
 import { settingsService } from '../settings.service.js';
+import { sessionsService } from '../sessions.service.js';
 import { computeRetryDelayMs } from '../transcription/worker.js';
 import { noteExtractionService } from './note-extraction.service.js';
 
@@ -83,6 +84,9 @@ export class NoteExtractionWorker {
       errorCode,
       err: cause ?? errorCode,
     });
+    // A failed job is still terminal: the session must leave PROCESS so the
+    // user sees REVIEW (or a retry button) instead of a stuck process action.
+    await sessionsService.advanceStageIfTerminal(batchId);
   }
 
   private async tick(): Promise<void> {

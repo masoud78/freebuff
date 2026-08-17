@@ -6,9 +6,11 @@ import {
   FileUp,
   LoaderCircle,
   Newspaper,
+  FileText,
   RefreshCw,
   Sparkles,
   Trash2,
+  TriangleAlert,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -22,6 +24,7 @@ import { PageHeader } from '../components/PageHeader';
 import { StatusBadge, type StatusTone } from '../components/StatusBadge';
 import { formatJalaliDate } from '../lib/format';
 import {
+  ApiError,
   commitSession,
   deleteSession,
   deleteSessionVoice,
@@ -33,14 +36,15 @@ import {
   uploadSessionFiles,
 } from '../lib/api';
 
-const STEPS = ['آپلود', 'تبدیل به متن', 'پردازش', 'اعمال در دیتابیس'] as const;
+const STEPS = ['آپلود', 'تبدیل به متن', 'پردازش', 'اعمال در دیتابیس', 'خبرهای پردازش'] as const;
 
 const STAGE_INDEX: Record<SessionDetail['stage'], number> = {
   UPLOAD: 0,
   TRANSCRIBE: 1,
   PROCESS: 2,
   REVIEW: 3,
-  COMMITTED: 3,
+  COMMITTED: 4,
+  NEWSROOM: 4,
 };
 
 const ACTION_TONE: Record<ProposedNoteAction, StatusTone> = {
@@ -134,13 +138,27 @@ export function SessionPage() {
     };
   }, [sessionId]);
 
-  // Poll only while a stage is actively running.
+  // Poll while a stage is actively running, and keep polling briefly after the
+  // processing finishes until the newsroom has arrived (it is produced by a
+  // Gemini call right after the last job completes), so the page comes fully
+  // online without a manual refresh.
+  const [settlePolls, setSettlePolls] = useState(0);
   const isActive = session?.derived.isTranscribing || session?.derived.isKnowledgeProcessing;
+  const awaitingNewsroom =
+    !isActive &&
+    session != null &&
+    (session.stage === 'PROCESS' || session.stage === 'REVIEW') &&
+    session.newsroom.length === 0 &&
+    settlePolls < 12;
+  const shouldPoll = isActive || awaitingNewsroom;
   useEffect(() => {
-    if (!isActive) return;
-    const timer = setInterval(() => void load(), 2000);
+    if (!shouldPoll) return;
+    const timer = setInterval(() => {
+      if (!isActive) setSettlePolls((n) => n + 1);
+      void load();
+    }, 2000);
     return () => clearInterval(timer);
-  }, [isActive, load]);
+  }, [shouldPoll, isActive, load]);
 
   const run = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(label);
@@ -149,7 +167,13 @@ export function SessionPage() {
       await fn();
       await load();
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'خطا در انجام عملیات.');
+      if (error instanceof ApiError) {
+        setActionError(
+          error.detail ? `${error.message} (${error.code ?? 'خطا'}) — ${error.detail}` : `${error.message} (${error.code ?? 'خطا'})`,
+        );
+      } else {
+        setActionError(error instanceof Error ? error.message : 'خطا در انجام عملیات.');
+      }
     } finally {
       setBusy(null);
     }
@@ -201,8 +225,9 @@ export function SessionPage() {
   const currentStep = STAGE_INDEX[session.stage];
   const failedCount = session.audio.filter((a) => a.status === 'FAILED').length;
   const completedCount = session.audio.filter((a) => a.hasTranscript).length;
-  const isCommitted = session.stage === 'COMMITTED';
-  const postProcessing = session.stage === 'REVIEW' || isCommitted;
+  const isApplied = session.stage === 'COMMITTED' || session.stage === 'NEWSROOM';
+  const isNewsroom = isApplied;
+  const postProcessing = session.stage === 'REVIEW';
 
   return (
     <>
@@ -233,8 +258,8 @@ export function SessionPage() {
       {/* Processing header meta: status + real destinations */}
       <div className="mb-6 flex flex-wrap items-center gap-2">
         <StatusBadge
-          tone={session.stage === 'COMMITTED' ? 'success' : session.stage === 'REVIEW' ? 'success' : 'warning'}
-          label={session.stage === 'COMMITTED' ? 'اعمال شده' : session.stage === 'REVIEW' ? 'آمادهٔ اعمال' : 'در حال پردازش'}
+          tone={isNewsroom ? 'success' : session.stage === 'REVIEW' ? 'success' : 'warning'}
+          label={isNewsroom ? 'خبرهای پردازش' : session.stage === 'REVIEW' ? 'آمادهٔ اعمال' : 'در حال پردازش'}
         />
         {session.destinations.length > 0 ? (
           session.destinations.map((dest) => (
@@ -336,18 +361,47 @@ export function SessionPage() {
                 {failedCount > 0 && <span className="ms-2 text-danger">{failedCount} خطا</span>}
               </span>
             </header>
+            {failedCount > 0 && (
+              <div className="border-b border-danger-muted bg-danger-muted/30 px-5 py-3">
+                <p className="flex items-center gap-2 text-sm font-medium text-danger">
+                  <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
+                  تبدیل {failedCount} ویس به متن با خطا مواجه شد
+                </p>
+                <ul className="mt-2 space-y-1.5">
+                  {session.audio
+                    .filter((audio) => audio.status === 'FAILED')
+                    .map((audio) => (
+                      <li key={audio.id} className="text-xs leading-5 text-danger">
+                        <span className="font-mono" dir="ltr">
+                          {audio.fileName}
+                        </span>
+                        {audio.errorMessage && <span> — {audio.errorMessage}</span>}
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            )}
             <ul className="divide-y divide-border">
               {session.audio.map((audio) => (
                 <li key={audio.id} className="flex items-center justify-between gap-4 px-5 py-3">
                   <div className="flex min-w-0 items-center gap-3">
                     <FileAudio className="size-4 shrink-0 text-text-muted" aria-hidden="true" />
-                    <span className="truncate text-sm text-text-primary" dir="ltr">
-                      {audio.fileName}
-                    </span>
+                    <div className="min-w-0">
+                      <span className="block truncate text-sm text-text-primary" dir="ltr">
+                        {audio.fileName}
+                      </span>
+                      {audio.status === 'FAILED' && audio.errorMessage && (
+                        <span className="block truncate text-xs text-danger" title={audio.errorMessage}>
+                          {audio.errorMessage}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     {audio.queueState && (
-                      <span className="text-xs text-text-secondary">{audio.queueState}</span>
+                      <span className={`text-xs ${audio.status === 'FAILED' ? 'text-danger' : 'text-text-secondary'}`}>
+                        {audio.queueState}
+                      </span>
                     )}
                     {audio.status === 'FAILED' && (
                       <button
@@ -388,17 +442,26 @@ export function SessionPage() {
         {/* Stage actions */}
         {!postProcessing && (
           <div className="flex flex-wrap items-center gap-3">
-            {session.stage === 'UPLOAD' && session.audio.some((a) => a.status === 'REGISTERED' || a.status === 'QUEUED') && (
-              <button
-                type="button"
-                onClick={() => void run('تبدیل', () => startSessionTranscription(sessionId))}
-                disabled={busy !== null}
-                className="inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {busy === 'تبدیل' ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <Sparkles className="size-4" aria-hidden="true" />}
-                تبدیل همه به متن
-              </button>
+            {derived.transcriptionBlockedReason && session.stage === 'UPLOAD' && (
+              <div className="flex items-start gap-2 rounded-md border border-danger-muted bg-danger-muted/30 px-4 py-3 text-sm text-danger">
+                <TriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                <span>{derived.transcriptionBlockedReason}</span>
+              </div>
             )}
+
+            {session.stage === 'UPLOAD' &&
+              session.audio.some((a) => a.status === 'REGISTERED' || a.status === 'QUEUED') &&
+              !derived.transcriptionBlockedReason && (
+                <button
+                  type="button"
+                  onClick={() => void run('تبدیل', () => startSessionTranscription(sessionId))}
+                  disabled={busy !== null}
+                  className="inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {busy === 'تبدیل' ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <Sparkles className="size-4" aria-hidden="true" />}
+                  تبدیل همه به متن
+                </button>
+              )}
 
             {derived.isTranscribing && (
               <div className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-4 py-2 text-sm text-text-secondary">
@@ -428,8 +491,8 @@ export function SessionPage() {
           </div>
         )}
 
-        {/* 1. Newsroom — the main intelligence output, right after the header */}
-        {session.newsroom.length > 0 && (
+        {/* Stage 5: newsroom is intentionally hidden during review and appears only after Apply. */}
+        {isNewsroom && session.newsroom.length > 0 && (
           <section className="rounded-lg border border-border bg-surface p-5 shadow-card">
             <h2 className="flex items-center gap-2 text-sm font-semibold text-text-primary">
               <Newspaper className="size-4 text-accent" aria-hidden="true" />
@@ -441,12 +504,17 @@ export function SessionPage() {
                   <h3 className="text-sm font-bold text-text-primary">{item.destinationName}</h3>
                   <div className="mt-1 border-s-2 border-border ps-4">
                     {item.stories.length > 0 ? (
-                      <div className="space-y-5">
+                      <div className="space-y-6">
                         {item.stories.map((story, index) => (
                           <article key={index}>
-                            <h4 className="text-base font-bold leading-8 text-text-primary">
+                            <h4 className="text-lg font-bold leading-8 text-text-primary">
                               {story.headline}
                             </h4>
+                            {story.subheading && (
+                              <h5 className="mt-3 border-b border-border pb-1 text-sm font-bold leading-7 text-text-primary">
+                                {story.subheading}
+                              </h5>
+                            )}
                             {story.paragraphs.map((paragraph, pIndex) => (
                               <p
                                 key={pIndex}
@@ -459,15 +527,28 @@ export function SessionPage() {
                         ))}
                       </div>
                     ) : (
-                      <p className="whitespace-pre-wrap text-[15px] leading-8 text-text-secondary">
-                        {item.content}
-                      </p>
+                      <div className="rounded-md bg-surface-muted/50 px-4 py-3">
+                        <p className="text-xs font-semibold text-text-secondary">چرا خبری تولید نشد؟</p>
+                        <p className="mt-1 whitespace-pre-wrap text-[15px] leading-8 text-text-secondary">
+                          {item.reason ?? item.content}
+                        </p>
+                      </div>
                     )}
                   </div>
                 </div>
               ))}
             </div>
           </section>
+        )}
+
+        {isNewsroom && session.newsroom.length === 0 && (
+          <EmptyState
+            icon={<Newspaper className="size-5" />}
+            title="خبری برای این پردازش ثبت نشد"
+            description={
+              session.newsroomReason ?? 'برای این پردازش محتوای خبری قابل ارائه‌ای تولید نشده است.'
+            }
+          />
         )}
 
         {/* 2. Compact summary */}
@@ -503,7 +584,7 @@ export function SessionPage() {
             </header>
             <div className="divide-y divide-border">
               {session.voices.map((voice) => {
-                const label = isCommitted ? undefined : voiceStatusLine(voice);
+                const label = isApplied ? undefined : voiceStatusLine(voice);
                 return (
                   <details key={voice.audioId} className="group px-5 py-3">
                     <summary className="flex cursor-pointer list-none items-center justify-between gap-4">
@@ -513,9 +594,18 @@ export function SessionPage() {
                           {voice.fileName}
                         </span>
                       </div>
-                      <div className="flex shrink-0 items-center gap-2 text-xs text-text-secondary">
-                        {label && <span>{label}</span>}
-                        <ChevronDown className="size-4 text-text-muted transition-transform group-open:rotate-180" aria-hidden="true" />
+                      <div className="flex shrink-0 items-center gap-2">
+                        {label && (
+                          <span className="hidden text-xs text-text-secondary sm:inline">{label}</span>
+                        )}
+                        <span className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface-muted px-2.5 py-1.5 text-xs font-medium text-text-primary transition-colors group-hover:border-border-strong group-hover:bg-surface-muted group-open:border-accent group-open:bg-accent-muted group-open:text-accent">
+                          <FileText className="size-3.5" aria-hidden="true" />
+                          {isApplied ? 'مشاهده گزارش و نکات' : 'نمایش گزارش و نکات'}
+                          <ChevronDown
+                            className="size-3.5 text-text-muted transition-transform group-open:rotate-180"
+                            aria-hidden="true"
+                          />
+                        </span>
                       </div>
                     </summary>
 
@@ -558,7 +648,7 @@ export function SessionPage() {
                                 <div className="flex flex-wrap items-center gap-2">
                                   <StatusBadge
                                     tone={ACTION_TONE[note.proposedAction]}
-                                    label={(isCommitted ? APPLIED_LABEL : ACTION_LABEL)[note.proposedAction]}
+                                    label={(isApplied ? APPLIED_LABEL : ACTION_LABEL)[note.proposedAction]}
                                   />
                                   {note.destinationName && (
                                     <span className="text-xs font-medium text-text-secondary">
@@ -617,26 +707,6 @@ export function SessionPage() {
           </section>
         )}
 
-        {session.stage === 'COMMITTED' && (
-          <section className="rounded-md border border-success-muted bg-success-muted/40 px-5 py-4">
-            <p className="flex items-center gap-2 text-sm font-medium text-success">
-              <CheckCircle2 className="size-4" aria-hidden="true" />
-              تغییرات با موفقیت در دیتابیس مقصدها اعمال شد.
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {session.commitSummary.destinations.map((dest) => (
-                <Link
-                  key={dest.destinationId ?? 0}
-                  to={`/destinations/${dest.destinationId}`}
-                  className="rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-muted"
-                >
-                  مشاهده {dest.destinationName}
-                </Link>
-              ))}
-            </div>
-          </section>
-        )}
-
         {session.stage === 'REVIEW' && session.voices.length === 0 && session.commitSummary.totalProposals === 0 && (
           <EmptyState
             icon={<Sparkles className="size-5" />}
@@ -663,10 +733,10 @@ export function SessionPage() {
           }
           description={
             confirm.kind === 'session'
-              ? session.stage === 'COMMITTED'
+              ? isApplied
                 ? 'این پردازش قبلاً در دیتابیس مقصدها اعمال شده است. حذف پردازش، نکات ثبت‌شده در مقصدها را حذف نمی‌کند.'
                 : 'این پردازش و همهٔ داده‌های مربوط به آن (فایل‌ها، متن‌ها و نتایج) حذف می‌شود.'
-              : session.stage === 'COMMITTED'
+              : isApplied
                 ? 'این ویس قبلاً به‌عنوان منبع اطلاعات مقصد استفاده شده است. با حذف ویس، نکات ثبت‌شده در دیتابیس حذف نمی‌شوند.'
                 : 'این ویس و همهٔ داده‌های مربوط به آن حذف می‌شود.'
           }

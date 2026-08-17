@@ -239,6 +239,14 @@ test('gemini errors are normalized to stable codes', () => {
       'GEMINI_FORBIDDEN',
     ],
     [new ApiError({ status: 429, message: 'rate limit exceeded' }), 'GEMINI_RATE_LIMIT'],
+    [
+      new ApiError({
+        status: 429,
+        message:
+          '{"error":{"message":"Quota exceeded for metric generativelanguage.googleapis.com/generate_content_requests_per_day"}}',
+      }),
+      'GEMINI_QUOTA_EXHAUSTED',
+    ],
     [new ApiError({ status: 500, message: 'internal error' }), 'GEMINI_API_ERROR'],
     [
       new TypeError('fetch failed', { cause: new Error('ECONNREFUSED connect') }),
@@ -251,6 +259,18 @@ test('gemini errors are normalized to stable codes', () => {
     assert.ok(normalized instanceof GeminiGatewayError);
     assert.equal(normalized.code, expected);
   }
+});
+
+test('quota exhaustion is a non-retryable, precise error', () => {
+  const normalized = toGeminiGatewayError(
+    new ApiError({
+      status: 429,
+      message: '{"error":{"message":"Quota exceeded for metric ... Limit: 15 per day"}}',
+    }),
+  );
+  assert.equal(normalized.code, 'GEMINI_QUOTA_EXHAUSTED');
+  assert.equal(normalized.retryable, false);
+  assert.ok(normalized.detail?.includes('Quota exceeded'), 'keeps Google\'s quota reason');
 });
 
 test('normalized errors carry a precise, sanitized detail', () => {
@@ -336,6 +356,39 @@ test('invalid model config is rejected', async () => {
   await assert.rejects(
     () => modelsService.updateModelConfig({ stage: 'BOGUS', modelId: 'gemini-2.5-pro' }),
     (error) => isDomainError(error, 'MODEL_CONFIG_INVALID'),
+  );
+});
+
+test('transcription only accepts voice-to-text (audio input) models', async () => {
+  // gemini-2.5-pro is generative but has no audio input capability.
+  await assert.rejects(
+    () => modelsService.updateModelConfig({ stage: 'TRANSCRIPTION', modelId: 'gemini-2.5-pro' }),
+    (error) => isDomainError(error, 'MODEL_CONFIG_INVALID'),
+  );
+});
+
+test('a quota-exhausted model cannot be selected for transcription', async () => {
+  const { getDatabase } = await import('../core/database/index.js');
+  const { geminiModels } = await import('../core/database/schema.js');
+  const db = getDatabase();
+  const now = new Date();
+  await db
+    .insert(geminiModels)
+    .values({
+      modelId: 'gemini-2.5-flash-noquota',
+      displayName: 'Gemini 2.5 Flash (no quota)',
+      description: '',
+      capabilitiesJson: JSON.stringify({ generative: true, embedding: false, audio: true }),
+      quotaStatus: 'exhausted',
+      quotaDetail: null,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoNothing({ target: geminiModels.modelId });
+
+  await assert.rejects(
+    () => modelsService.updateModelConfig({ stage: 'TRANSCRIPTION', modelId: 'gemini-2.5-flash-noquota' }),
+    (error) => isDomainError(error, 'GEMINI_QUOTA_EXHAUSTED'),
   );
 });
 

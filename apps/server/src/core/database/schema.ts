@@ -51,6 +51,8 @@ export const geminiModels = sqliteTable('gemini_models', {
   displayName: text('display_name').notNull(),
   description: text('description').notNull().default(''),
   capabilitiesJson: text('capabilities_json').notNull(),
+  quotaStatus: text('quota_status'),
+  quotaDetail: text('quota_detail'),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
 });
@@ -88,7 +90,7 @@ export type NewPromptVersionRow = typeof promptVersions.$inferInsert;
 export const batches = sqliteTable('batches', {
   id: integer('id').primaryKey(),
   status: text('status').notNull().default('CREATED'),
-  /** User-facing stage of the simplified product flow (UPLOAD → … → COMMITTED). */
+  /** User-facing stage of the simplified product flow (UPLOAD → … → NEWSROOM). */
   sessionStage: text('session_stage').notNull().default('UPLOAD'),
   /** Soft-delete marker: committed sessions are soft-deleted so committed
    * source transcripts keep a valid batch/audio FK chain. */
@@ -1015,7 +1017,8 @@ export type NewDestinationInsightSourceRow = typeof destinationInsightSources.$i
 /**
  * Per-destination processing newsroom — the narrative of what this processing
  * session actually changed/adds, built from the backend's reconciliation diffs
- * (never re-derived by the reporter). Survives restart, kept after commit.
+ * (never re-derived by the reporter). Survives restart, kept after commit for
+ * the post-apply newsroom stage.
  */
 export const processingDestinationNews = sqliteTable(
   'processing_destination_news',

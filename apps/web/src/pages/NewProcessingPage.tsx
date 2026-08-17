@@ -11,7 +11,7 @@ import { StatusBadge, type StatusTone } from '../components/StatusBadge';
 import { formatJalaliDate } from '../lib/format';
 import { deleteSession, fetchSessions } from '../lib/api';
 
-const STEPS = ['آپلود', 'تبدیل به متن', 'پردازش', 'اعمال در دیتابیس'] as const;
+const STEPS = ['آپلود', 'تبدیل به متن', 'پردازش', 'اعمال در دیتابیس', 'خبرهای پردازش'] as const;
 
 const STAGE_TONE: Record<SessionStage, StatusTone> = {
   UPLOAD: 'neutral',
@@ -19,6 +19,7 @@ const STAGE_TONE: Record<SessionStage, StatusTone> = {
   PROCESS: 'warning',
   REVIEW: 'success',
   COMMITTED: 'success',
+  NEWSROOM: 'success',
 };
 
 const STAGE_LABEL: Record<SessionStage, string> = {
@@ -26,7 +27,8 @@ const STAGE_LABEL: Record<SessionStage, string> = {
   TRANSCRIBE: 'در حال تبدیل به متن',
   PROCESS: 'در حال پردازش',
   REVIEW: 'آمادهٔ اعمال',
-  COMMITTED: 'اعمال شده',
+  COMMITTED: 'خبرهای پردازش',
+  NEWSROOM: 'خبرهای پردازش',
 };
 
 export function NewProcessingPage() {
@@ -174,7 +176,7 @@ export function NewProcessingPage() {
         <ConfirmDialog
           title={`حذف پردازش ${formatJalaliDate(confirm.createdAt)}`}
           description={
-            confirm.stage === 'COMMITTED'
+            confirm.stage === 'COMMITTED' || confirm.stage === 'NEWSROOM'
               ? 'این پردازش قبلاً در دیتابیس مقصدها اعمال شده است. حذف پردازش، نکات ثبت‌شده در مقصدها را حذف نمی‌کند.'
               : 'این پردازش و همهٔ داده‌های مربوط به آن (فایل‌ها، متن‌ها و نتایج) حذف می‌شود.'
           }

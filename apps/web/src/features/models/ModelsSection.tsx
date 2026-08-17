@@ -1,5 +1,5 @@
-import { CheckCircle2, ChevronDown, RefreshCw, TriangleAlert } from 'lucide-react';
-import type { ModelStage } from '@freebuff/contracts';
+import { CheckCircle2, ChevronDown, Gauge, RefreshCw, TriangleAlert } from 'lucide-react';
+import type { GeminiModelInfo, GeminiModelQuotaStatus, ModelStage } from '@freebuff/contracts';
 import { ErrorState } from '../../components/ErrorState';
 import { LoadingState } from '../../components/LoadingState';
 import { StatusBadge, type StatusTone } from '../../components/StatusBadge';
@@ -23,6 +23,25 @@ const SELECT_CLASSES =
 const BUTTON_CLASSES =
   'inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50';
 
+const QUOTA_BADGE: Record<GeminiModelQuotaStatus, { tone: StatusTone; label: string } | null> = {
+  ok: { tone: 'success', label: 'سهمیه فعال' },
+  exhausted: { tone: 'danger', label: 'سهمیه تمام شده' },
+  rate_limited: { tone: 'warning', label: 'محدودیت موقت' },
+  error: { tone: 'warning', label: 'خطا در بررسی سهمیه' },
+  unknown: null,
+};
+
+const QUOTA_OPTION_SUFFIX: Partial<Record<GeminiModelQuotaStatus, string>> = {
+  ok: ' — سهمیه فعال',
+  exhausted: ' — سهمیه تمام شده',
+  rate_limited: ' — محدودیت موقت',
+  error: ' — خطا',
+};
+
+function quotaSuffix(model: GeminiModelInfo): string {
+  return model.quotaStatus ? (QUOTA_OPTION_SUFFIX[model.quotaStatus] ?? '') : '';
+}
+
 interface StageCardProps {
   stage: ModelStage;
   hasModels: boolean;
@@ -30,7 +49,7 @@ interface StageCardProps {
   selectedId: string;
   unavailable: boolean;
   onSelect: (stage: ModelStage, modelId: string) => void;
-  models: { id: string; displayName: string }[];
+  models: GeminiModelInfo[];
 }
 
 function StageCard({ stage, hasModels, saving, selectedId, unavailable, onSelect, models }: StageCardProps) {
@@ -45,6 +64,11 @@ function StageCard({ stage, hasModels, saving, selectedId, unavailable, onSelect
       statusLabel = 'انتخاب شده';
     }
   }
+
+  const selectedModel = models.find((model) => model.id === selectedId);
+  const selectedQuota = selectedModel?.quotaStatus
+    ? (QUOTA_BADGE[selectedModel.quotaStatus] ?? null)
+    : null;
 
   return (
     <div className="space-y-2 rounded-md border border-border p-4">
@@ -64,11 +88,21 @@ function StageCard({ stage, hasModels, saving, selectedId, unavailable, onSelect
       >
         <option value="">{hasModels ? '— انتخاب مدل —' : '—'}</option>
         {models.map((model) => (
-          <option key={model.id} value={model.id}>
-            {model.displayName} ({model.id})
+          <option key={model.id} value={model.id} disabled={model.quotaStatus === 'exhausted'}>
+            {model.displayName} ({model.id}){quotaSuffix(model)}
           </option>
         ))}
       </select>
+      {selectedQuota && (
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusBadge tone={selectedQuota.tone} label={selectedQuota.label} />
+          {selectedModel?.quotaDetail && (
+            <span className="text-xs text-text-muted" dir="ltr">
+              {selectedModel.quotaDetail}
+            </span>
+          )}
+        </div>
+      )}
       {unavailable && (
         <p className="flex items-center gap-1.5 text-xs text-danger">
           <TriangleAlert className="size-3.5" aria-hidden="true" />
@@ -155,6 +189,18 @@ export function ModelsSection() {
           {isRefreshing ? 'در حال دریافت…' : 'به‌روزرسانی مدل‌ها'}
         </button>
       </div>
+
+      {hasModels && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-border bg-surface-muted/40 px-3 py-2 text-xs text-text-secondary">
+          <span className="inline-flex items-center gap-1.5">
+            <Gauge className="size-3.5" aria-hidden="true" />
+            سهمیهٔ هر مدل هنگام به‌روزرسانی با یک درخواست کوچک بررسی می‌شود:
+          </span>
+          <StatusBadge tone="success" label="فعال" />
+          <StatusBadge tone="danger" label="تمام شده" />
+          <StatusBadge tone="warning" label="محدودیت موقت" />
+        </div>
+      )}
 
       {!hasModels && (
         <div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-text-secondary">

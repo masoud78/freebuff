@@ -55,6 +55,7 @@ export const geminiErrorCodes = [
   'GEMINI_FORBIDDEN',
   'GEMINI_NETWORK_ERROR',
   'GEMINI_RATE_LIMIT',
+  'GEMINI_QUOTA_EXHAUSTED',
   'GEMINI_API_ERROR',
 ] as const;
 
@@ -171,6 +172,7 @@ export const geminiTestOutcomes = [
   'blocked',
   'network_error',
   'rate_limit',
+  'quota_exhausted',
   'api_error',
 ] as const;
 export type GeminiTestOutcome = (typeof geminiTestOutcomes)[number];
@@ -198,14 +200,27 @@ export interface GeminiTestConnectionResponse extends GeminiCredentialStatusResp
 export interface GeminiModelCapabilities {
   generative: boolean;
   embedding: boolean;
+  /** Accepts audio input for voice-to-text transcription. */
   audio: boolean;
 }
+
+/**
+ * Live per-model quota state from the last refresh probe. Google's API does
+ * not expose remaining quota amounts; we probe each voice-capable model with a
+ * tiny request and record the outcome.
+ */
+export const geminiModelQuotaStatuses = ['ok', 'exhausted', 'rate_limited', 'error', 'unknown'] as const;
+export type GeminiModelQuotaStatus = (typeof geminiModelQuotaStatuses)[number];
 
 export interface GeminiModelInfo {
   id: string;
   displayName: string;
   description: string;
   capabilities: GeminiModelCapabilities;
+  /** Live probe outcome (absent = never probed). */
+  quotaStatus?: GeminiModelQuotaStatus;
+  /** Precise underlying reason from Google (sanitized), when available. */
+  quotaDetail?: string | null;
 }
 
 export interface GeminiModelsResponse {
@@ -1083,6 +1098,8 @@ export const sessionStages = [
   'PROCESS',
   'REVIEW',
   'COMMITTED',
+  /** Stage 5: the applied processing newsroom. */
+  'NEWSROOM',
 ] as const;
 export type SessionStage = (typeof sessionStages)[number];
 
@@ -1231,6 +1248,8 @@ export interface SessionAudioItem {
   hasTranscript: boolean;
   /** Simple user-facing queue state. */
   queueState: 'در صف' | 'در حال انجام' | 'تکمیل شد' | 'خطا' | 'تکراری' | null;
+  /** Precise failure reason (e.g. quota exhausted), or null when none. */
+  errorMessage: string | null;
 }
 
 export interface SessionSummary {
@@ -1255,6 +1274,8 @@ export interface SessionDerivedState {
   isKnowledgeProcessing: boolean;
   knowledgeProcessingFinished: boolean;
   canApplyToDatabase: boolean;
+  /** Persian reason transcription is blocked (e.g. quota exhausted), or null. */
+  transcriptionBlockedReason: string | null;
 }
 
 export interface SessionDetail extends SessionSummary {
@@ -1262,8 +1283,10 @@ export interface SessionDetail extends SessionSummary {
   voices: ProcessedVoice[];
   /** Destinations grouped per proposed action, for the review summary. */
   commitSummary: CommitSummary;
-  /** Per-destination newsroom narrative (survives restart, shown pre-apply). */
+  /** Per-destination newsroom narrative, shown only in the post-apply newsroom stage. */
   newsroom: ProcessingNewsDestination[];
+  /** Why the whole newsroom is empty (e.g. no destination was identified), or null. */
+  newsroomReason: string | null;
   derived: SessionDerivedState;
 }
 
@@ -1333,8 +1356,12 @@ export interface AudienceInsightItem {
 
 /** One editorial newsroom story (an H2 headline + full paragraphs). */
 export interface NewsroomStory {
+  /** H2 heading — the useful point itself, ready to use as a section title. */
   headline: string;
+  /** Full body paragraphs (clean, standalone, ready to publish). */
   paragraphs: string[];
+  /** Optional H3 subheading, only when the section genuinely needs structure. */
+  subheading?: string | null;
 }
 
 /** One per-destination newsroom narrative of a processing session. */
@@ -1345,6 +1372,8 @@ export interface ProcessingNewsDestination {
   content: string;
   /** Structured editorial stories produced by the reporter (empty for fallbacks). */
   stories: NewsroomStory[];
+  /** Persian reason no editorial story was produced for this destination. */
+  reason: string | null;
 }
 
 /**

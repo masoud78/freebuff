@@ -92,7 +92,7 @@ function queueStateFor(status: string): SessionAudioItem['queueState'] {
  * Processing sessions — the simplified, user-facing product flow.
  *
  *   UPLOAD → (user clicks transcribe) → TRANSCRIBE → (user clicks process)
- *   → PROCESS → REVIEW → (user clicks apply) → COMMITTED
+ *   → PROCESS → REVIEW → (user clicks apply) → NEWSROOM (stage 5)
  *
  * The backend still uses `batches` as the processing boundary and the SQLite
  * job engine for transcription and note extraction; the user never sees any
@@ -146,7 +146,7 @@ export class SessionsService {
   /** Save uploaded files into `{workspace}/audio/{sessionId}/` and register them. */
   async uploadFiles(sessionId: number, files: UploadedFile[]): Promise<UploadResult> {
     const batch = await this.requireBatch(sessionId);
-    if (batch.sessionStage === 'COMMITTED') {
+    if (batch.sessionStage === 'COMMITTED' || batch.sessionStage === 'NEWSROOM') {
       throw new DomainError('BATCH_NOT_STARTABLE', 'این جلسه پردازش قبلاً نهایی شده است.');
     }
     const audioDir = join(await getWorkspaceAudioDir(), String(sessionId));
@@ -226,6 +226,13 @@ export class SessionsService {
     if (!apiKey) throw new DomainError('PIPELINE_NOT_READY', 'ابتدا کلید Gemini را در تنظیمات وارد کنید.');
     const modelId = await modelsService.getConfiguredModelId('TRANSCRIPTION');
     if (!modelId) throw new DomainError('PIPELINE_NOT_READY', 'مدل تبدیل ویس به متن انتخاب نشده است.');
+    const transcriptionQuota = await modelsService.getConfiguredModelQuota('TRANSCRIPTION');
+    if (transcriptionQuota?.quotaStatus === 'exhausted') {
+      throw new DomainError(
+        'GEMINI_QUOTA_EXHAUSTED',
+        'سهمیه مدل تبدیل ویس به متن تمام شده است. در بخش «مدل‌ها» مدل دیگری انتخاب کنید.',
+      );
+    }
     const prompt = await promptsService.getActiveVersion('TRANSCRIPTION');
     if (!prompt) throw new DomainError('PIPELINE_NOT_READY', 'پرامپت تبدیل ویس به متن تنظیم نشده است.');
 
@@ -269,7 +276,7 @@ export class SessionsService {
   /** Re-queue one permanently failed audio for transcription. */
   async retryTranscription(sessionId: number, audioId: number): Promise<SessionDetail> {
     const batch = await this.requireBatch(sessionId);
-    if (batch.sessionStage === 'COMMITTED') {
+    if (batch.sessionStage === 'COMMITTED' || batch.sessionStage === 'NEWSROOM') {
       throw new DomainError('BATCH_NOT_STARTABLE', 'این جلسه پردازش قبلاً نهایی شده است.');
     }
     const db = getDatabase();
@@ -335,6 +342,23 @@ export class SessionsService {
       throw new DomainError('BATCH_NOT_STARTABLE', 'هنوز هیچ Transcript آماده‌ای وجود ندارد.');
     }
 
+    // Re-queue a previously FAILED note-extraction job instead of silently
+    // doing nothing on a second click (the idempotency key would otherwise
+    // match the dead job and block a retry forever).
+    const failedJobs = await db
+      .select({ idempotencyKey: jobs.idempotencyKey })
+      .from(jobs)
+      .where(
+        and(
+          eq(jobs.batchId, sessionId),
+          eq(jobs.jobType, 'NOTE_EXTRACTION'),
+          eq(jobs.status, 'FAILED'),
+        ),
+      );
+    for (const failed of failedJobs) {
+      await jobService.requeueJob(failed.idempotencyKey);
+    }
+
     for (const row of ready) {
       await jobService.createJob({
         batchId: sessionId,
@@ -348,6 +372,11 @@ export class SessionsService {
       .update(batches)
       .set({ status: 'PROCESSING', sessionStage: 'PROCESS', updatedAt: new Date() })
       .where(eq(batches.id, sessionId));
+
+    // If a previous run already finished every job (e.g. a race between the
+    // last worker tick and a second button click), immediately settle the
+    // stage instead of leaving the session stuck in PROCESS.
+    await this.advanceStageIfTerminal(sessionId);
 
     return this.getSession(sessionId);
   }
@@ -627,7 +656,7 @@ export class SessionsService {
 
     await db
       .update(batches)
-      .set({ sessionStage: 'COMMITTED', status: 'COMMITTED', completedAt: new Date(), updatedAt: new Date() })
+      .set({ sessionStage: 'NEWSROOM', status: 'COMMITTED', completedAt: new Date(), updatedAt: new Date() })
       .where(eq(batches.id, sessionId));
 
     const destinationRows = await db
@@ -668,7 +697,8 @@ export class SessionsService {
       .select({ id: destinationNoteSources.id })
       .from(destinationNoteSources)
       .where(eq(destinationNoteSources.audioId, audioId));
-    const committed = batch.sessionStage === 'COMMITTED' || sourceRows.length > 0;
+    const committed =
+      batch.sessionStage === 'COMMITTED' || batch.sessionStage === 'NEWSROOM' || sourceRows.length > 0;
 
     await jobService.cancelActiveByEntityIds([audioId]);
 
@@ -741,7 +771,8 @@ export class SessionsService {
       .where(eq(destinationNoteSources.processingSessionId, sessionId))
       .limit(1)
       .get();
-    const committed = batch.sessionStage === 'COMMITTED' || committedSource !== undefined;
+    const committed =
+      batch.sessionStage === 'COMMITTED' || batch.sessionStage === 'NEWSROOM' || committedSource !== undefined;
 
     await jobService.cancelActiveByEntityIds(audioIds);
 
@@ -861,6 +892,18 @@ export class SessionsService {
       .where(eq(transcripts.status, 'COMPLETED'));
     const transcriptAudioIds = new Set(transcriptRows.map((r) => r.audioId));
 
+    // Precise failure reason per voice from its terminal failed job.
+    const failedJobRows = await db
+      .select({ entityId: jobs.entityId, errorMessage: jobs.errorMessage })
+      .from(jobs)
+      .where(and(eq(jobs.batchId, sessionId), eq(jobs.status, 'FAILED')));
+    const errorByAudioId = new Map<number, string>();
+    for (const row of failedJobRows) {
+      if (row.errorMessage && !errorByAudioId.has(row.entityId)) {
+        errorByAudioId.set(row.entityId, row.errorMessage);
+      }
+    }
+
     const audio: SessionAudioItem[] = audioRows.map((row) => ({
       id: row.id,
       fileName: row.originalName,
@@ -868,6 +911,7 @@ export class SessionsService {
       status: row.status as SessionAudioItem['status'],
       hasTranscript: transcriptAudioIds.has(row.id),
       queueState: queueStateFor(row.status),
+      errorMessage: errorByAudioId.get(row.id) ?? null,
     }));
 
     // Clean transcripts exist (non-duplicate) for this session?
@@ -994,6 +1038,7 @@ export class SessionsService {
       voices,
       commitSummary,
       newsroom: await newsroomService.listForSession(sessionId),
+      newsroomReason: await this.computeNewsroomReason(sessionId),
       derived: await this.computeDerived(
         batch,
         audioRows,
@@ -1002,6 +1047,20 @@ export class SessionsService {
         actionableInsightTotal,
       ),
     };
+  }
+
+  /**
+   * Explain an empty processing newsroom instead of showing a generic "nothing"
+   * box: no identified destination versus news that was generated but empty.
+   */
+  private async computeNewsroomReason(sessionId: number): Promise<string | null> {
+    const newsroom = await newsroomService.listForSession(sessionId);
+    if (newsroom.length > 0) return null;
+    const destinations = await this.listSessionDestinations(sessionId);
+    if (destinations.length === 0) {
+      return 'هیچ مقصدی در این پردازش شناسایی نشد؛ به همین دلیل خبری تولید نشده است.';
+    }
+    return 'خبر این پردازش هنوز تولید نشده است. کمی صبر کنید یا پردازش را دوباره اجرا کنید.';
   }
 
   /** Stage-specific workflow state derived from real job/audio data. */
@@ -1035,11 +1094,19 @@ export class SessionsService {
     const isTranscribing = transActive > 0;
     const transcriptionFinished = transcriptionStarted && allAudioTerminal && transActive === 0;
     const isKnowledgeProcessing = noteActive > 0;
-    const knowledgeProcessingFinished = batch.sessionStage === 'REVIEW' || batch.sessionStage === 'COMMITTED';
+    const knowledgeProcessingFinished =
+      batch.sessionStage === 'REVIEW' || batch.sessionStage === 'COMMITTED' || batch.sessionStage === 'NEWSROOM';
     const canStartProcessing =
       hasCleanTranscript && transcriptionFinished && !isKnowledgeProcessing && !knowledgeProcessingFinished;
     const canApplyToDatabase =
       batch.sessionStage === 'REVIEW' && (actionableTotal > 0 || actionableInsightTotal > 0);
+
+    // A quota-exhausted transcription model blocks the voice-to-text step.
+    const transcriptionQuota = await modelsService.getConfiguredModelQuota('TRANSCRIPTION');
+    const transcriptionBlockedReason =
+      transcriptionQuota?.quotaStatus === 'exhausted'
+        ? 'سهمیه مدل تبدیل ویس به متن تمام شده است. در بخش «مدل‌ها» مدل دیگری انتخاب کنید.'
+        : null;
 
     return {
       isTranscribing,
@@ -1048,6 +1115,7 @@ export class SessionsService {
       isKnowledgeProcessing,
       knowledgeProcessingFinished,
       canApplyToDatabase,
+      transcriptionBlockedReason,
     };
   }
 

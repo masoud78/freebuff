@@ -2,6 +2,7 @@ import {
   modelConfigSchema,
   modelStages,
   type GeminiModelCapabilities,
+  type GeminiModelQuotaStatus,
   type ModelConfigInput,
   type ModelConfigResponse,
   type ModelConfigsResponse,
@@ -17,13 +18,16 @@ const PROVIDER = 'GEMINI';
 const MESSAGES = {
   notFound: 'مدل انتخاب‌شده در فهرست مدل‌های Gemini نیست.',
   capability: 'مدل انتخاب‌شده برای این مرحله مناسب نیست.',
+  quotaExhausted:
+    'سهمیه این مدل در حساب Gemini شما تمام شده است. مدل دیگری انتخاب کنید یا بعداً دوباره تلاش کنید.',
   database: 'خطا در ذخیره پیکربندی مدل. دوباره تلاش کنید.',
 } as const;
 
 function capabilityFits(stage: ModelStage, capabilities: GeminiModelCapabilities): boolean {
   if (stage === 'EMBEDDING') return capabilities.embedding;
-  // Transcription may use a dedicated audio model or a generative fallback.
-  if (stage === 'TRANSCRIPTION') return capabilities.audio || capabilities.generative;
+  // Voice-to-text requires a model that accepts audio input — no generative
+  // fallback, so text-only/image/TTS models are never offered for this stage.
+  if (stage === 'TRANSCRIPTION') return capabilities.audio;
   return capabilities.generative;
 }
 
@@ -67,6 +71,7 @@ export class ModelsService {
       .select({
         modelId: geminiModels.modelId,
         capabilitiesJson: geminiModels.capabilitiesJson,
+        quotaStatus: geminiModels.quotaStatus,
       })
       .from(geminiModels)
       .where(eq(geminiModels.modelId, modelId))
@@ -78,6 +83,10 @@ export class ModelsService {
     const capabilities = JSON.parse(cached.capabilitiesJson) as GeminiModelCapabilities;
     if (!capabilityFits(stage, capabilities)) {
       throw new DomainError('MODEL_CONFIG_INVALID', MESSAGES.capability);
+    }
+    // Block selecting a model whose live quota probe already failed.
+    if (cached.quotaStatus === 'exhausted') {
+      throw new DomainError('GEMINI_QUOTA_EXHAUSTED', MESSAGES.quotaExhausted);
     }
 
     const now = new Date();
@@ -105,6 +114,28 @@ export class ModelsService {
       .where(eq(modelConfigs.stage, stage))
       .get();
     return row?.modelId ?? null;
+  }
+
+  /** The configured model's id + last quota probe, or null when unset. */
+  async getConfiguredModelQuota(
+    stage: ModelStage,
+  ): Promise<{ modelId: string; quotaStatus: GeminiModelQuotaStatus } | null> {
+    const db = getDatabase();
+    const row = await db
+      .select({ modelId: modelConfigs.modelId })
+      .from(modelConfigs)
+      .where(eq(modelConfigs.stage, stage))
+      .get();
+    if (!row?.modelId) return null;
+    const cached = await db
+      .select({ quotaStatus: geminiModels.quotaStatus })
+      .from(geminiModels)
+      .where(eq(geminiModels.modelId, row.modelId))
+      .get();
+    return {
+      modelId: row.modelId,
+      quotaStatus: (cached?.quotaStatus as GeminiModelQuotaStatus | null | undefined) ?? 'unknown',
+    };
   }
 
   private async cachedModelIds(): Promise<Set<string>> {

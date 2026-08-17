@@ -15,7 +15,14 @@ import type { GeminiGatewayLike } from '../gemini/gateway.js';
 /** Minimum cosine similarity to consider two notes "about the same topic". */
 const NOTE_SIMILARITY_THRESHOLD = 0.86;
 /** Lexical overlap ratio that marks a note as ambiguous (needs AI). */
-const LEXICAL_OVERLAP_THRESHOLD = 0.45;
+const LEXICAL_OVERLAP_THRESHOLD = 0.35;
+/** Very high semantic similarity plus shared topic terms must never become a duplicate ADD. */
+const STRONG_SAME_TOPIC_SIMILARITY = 0.92;
+
+const TOPIC_STOPWORDS = new Set([
+  'است', 'بود', 'شد', 'شود', 'می', 'نمی', 'برای', 'با', 'به', 'از', 'در', 'و', 'یا', 'که',
+  'این', 'آن', 'یک', 'را', 'تا', 'روی', 'درباره', 'هم', 'همان', 'فقط', 'نیز', 'دارد', 'دارد',
+]);
 /** Bounded context fed to the AI comparison (never the whole destination). */
 const MAX_AI_CONTEXT_NOTES = 3;
 
@@ -49,7 +56,13 @@ interface ExistingNote {
 }
 
 function normalize(value: string): string {
-  return normalizeDestinationName(value).trim();
+  return normalizeDestinationName(value)
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    .replace(/‌/g, ' ')
+    .replace(/ي/g, 'ی')
+    .replace(/ك/g, 'ک')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /** Short grounded excerpt of real note text (no invented detail). */
@@ -60,9 +73,14 @@ function excerpt(value: string, max = 120): string {
 
 function termsOf(value: string): Set<string> {
   const seen = new Set<string>();
-  for (const term of normalize(value).split(/[\s،.؛:!؟?()\-–_]+/)) {
-    if (term.length < 2) continue;
-    seen.add(term);
+  for (const raw of normalize(value).split(/[\s،.؛:!؟?()\-–_]+/)) {
+    if (raw.length < 2 || TOPIC_STOPWORDS.has(raw)) continue;
+    // Collapse common Persian prefixes/suffixes so «هتل‌ها»، «هتل» and
+    // «هتل‌های» contribute one topic term instead of three surface forms.
+    const term = raw
+      .replace(/^ن?می(?=\S)/, '')
+      .replace(/(?:های|ها|ترین|تر|ان|ات|ی)$/, '');
+    if (term.length >= 2 && !TOPIC_STOPWORDS.has(term)) seen.add(term);
   }
   return seen;
 }
@@ -167,7 +185,14 @@ export class NoteReconciliationService {
       );
       const top = await this.mostSimilarNote(ctx.embeddingModelId, existing, candidateVec.embedding);
       if (top && top.similarity >= NOTE_SIMILARITY_THRESHOLD) {
-        return this.aiCompare(note, destinationId, existing, top.noteId, ctx);
+        const matched = existing.find((candidate) => candidate.id === top.noteId);
+        const topicOverlap = matched
+          ? lexicalOverlap(noteEmbeddingText(note), noteEmbeddingText(matched))
+          : 0;
+        return this.aiCompare(note, destinationId, existing, top.noteId, ctx, {
+          semanticSimilarity: top.similarity,
+          topicOverlap,
+        });
       }
     }
 
@@ -181,7 +206,10 @@ export class NoteReconciliationService {
       }
     }
     if (best) {
-      return this.aiCompare(note, destinationId, existing, best.id, ctx);
+      return this.aiCompare(note, destinationId, existing, best.id, ctx, {
+        semanticSimilarity: null,
+        topicOverlap: best.overlap,
+      });
     }
 
     // 4. Default — genuinely new.
@@ -224,6 +252,10 @@ export class NoteReconciliationService {
     existing: ExistingNote[],
     matchedNoteId: number,
     ctx: NoteReconciliationContext,
+    evidence: { semanticSimilarity: number | null; topicOverlap: number } = {
+      semanticSimilarity: null,
+      topicOverlap: 0,
+    },
   ): Promise<NoteProposalResult> {
     const contextNotes = [existing.find((n) => n.id === matchedNoteId), ...existing.filter((n) => n.id !== matchedNoteId)]
       .filter((n): n is ExistingNote => n !== undefined)
@@ -265,9 +297,22 @@ export class NoteReconciliationService {
     let decision: ProposedNoteAction = result.comparison.decision;
     let targetId: number | null = result.comparison.matchedNoteId === 0 ? null : result.comparison.matchedNoteId;
     if (decision !== 'ADD' && (targetId === null || !validIds.has(targetId))) {
-      // Invalid reference — fall back to the conservative safe behavior.
-      decision = 'ADD';
-      targetId = null;
+      // The deterministic gate already identified the closest existing note;
+      // use it when the model omitted the id instead of creating a duplicate.
+      targetId = validIds.has(matchedNoteId) ? matchedNoteId : null;
+      if (targetId === null) decision = 'ADD';
+    }
+    if (
+      decision === 'ADD' &&
+      evidence.semanticSimilarity !== null &&
+      evidence.semanticSimilarity >= STRONG_SAME_TOPIC_SIMILARITY &&
+      evidence.topicOverlap >= LEXICAL_OVERLAP_THRESHOLD
+    ) {
+      // A high-confidence semantic match with shared topic terms is the same
+      // database subject even when the reporter rewrote its title. Never add
+      // a second card for it; store the new wording as a version.
+      decision = 'UPDATE';
+      targetId = matchedNoteId;
     }
     if (decision === 'ADD') targetId = null;
 

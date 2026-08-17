@@ -94,16 +94,13 @@ export function useModels() {
 
   const modelsForStage = useCallback(
     (stage: ModelStage): GeminiModelInfo[] => {
-      const audioModels = models.filter((model) => model.capabilities.audio);
       switch (stage) {
         case 'EMBEDDING':
           return models.filter((model) => model.capabilities.embedding);
         case 'TRANSCRIPTION':
-          // Prefer dedicated audio models; fall back to generative when the
-          // account exposes no audio-capable models.
-          return audioModels.length > 0
-            ? audioModels
-            : models.filter((model) => model.capabilities.generative);
+          // Voice-to-text only: models that accept audio input. Text/image/TTS
+          // models are never offered for this stage.
+          return models.filter((model) => model.capabilities.audio);
         default:
           return models.filter((model) => model.capabilities.generative);
       }

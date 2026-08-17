@@ -109,6 +109,8 @@ export class GeminiService {
         displayName: geminiModels.displayName,
         description: geminiModels.description,
         capabilitiesJson: geminiModels.capabilitiesJson,
+        quotaStatus: geminiModels.quotaStatus,
+        quotaDetail: geminiModels.quotaDetail,
       })
       .from(geminiModels)
       .orderBy(geminiModels.modelId);
@@ -118,6 +120,8 @@ export class GeminiService {
         displayName: row.displayName,
         description: row.description,
         capabilities: JSON.parse(row.capabilitiesJson) as GeminiModelInfo['capabilities'],
+        quotaStatus: (row.quotaStatus as GeminiModelInfo['quotaStatus']) ?? 'unknown',
+        quotaDetail: row.quotaDetail ?? null,
       })),
       refreshedAt,
     };
@@ -132,7 +136,9 @@ export class GeminiService {
     if (!key) {
       throw new DomainError('GEMINI_NOT_CONFIGURED', MESSAGES.notConfigured);
     }
-    const models = await this.gateway.listModels(key);
+    // probeQuota: true runs a tiny live probe per voice-capable model so the
+    // UI can show real per-model quota state and block exhausted models.
+    const models = await this.gateway.listModels(key, { probeQuota: true });
 
     const db = getDatabase();
     await db.delete(geminiModels);
@@ -146,6 +152,8 @@ export class GeminiService {
             displayName: model.displayName,
             description: model.description,
             capabilitiesJson: JSON.stringify(model.capabilities),
+            quotaStatus: model.quotaStatus ?? null,
+            quotaDetail: model.quotaDetail ?? null,
             createdAt: now,
             updatedAt: now,
           })),
@@ -168,6 +176,8 @@ function outcomeFromGatewayError(error: unknown): GeminiTestOutcome {
         return 'network_error';
       case 'GEMINI_RATE_LIMIT':
         return 'rate_limit';
+      case 'GEMINI_QUOTA_EXHAUSTED':
+        return 'quota_exhausted';
       default:
         return 'api_error';
     }

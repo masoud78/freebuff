@@ -20,12 +20,11 @@ export interface NewsroomReporter {
     apiKey: string;
     modelId: string;
     payload: NewsroomPayload;
-  }): Promise<{ stories: NewsroomStory[]; usage: GeminiUsage; durationMs: number }>;
+  }): Promise<{ stories: NewsroomStory[]; noNewsReason: string | null; usage: GeminiUsage; durationMs: number }>;
 }
 
 const NO_NEWS_TEXT =
-  'در این پردازش اطلاعات تازه یا تغییر معناداری برای دیتابیس مقصد پیدا نشد. ' +
-  'بیشتر تماس‌ها درباره موضوعاتی بودند که اطلاعات آن‌ها از قبل در دیتابیس ثبت شده بود.';
+  'نکتهٔ جدیدی برای این مقصد ثبت نشد، چون اطلاعاتی که در ویس‌ها مطرح شد قبلاً در دیتابیس این مقصد وجود دارد یا اطلاعات قابل استفادهٔ جدیدی نداشت.';
 
 /**
  * Processing newsroom — a short, grounded narrative per destination of what a
@@ -39,8 +38,9 @@ export class NewsroomService {
   async generateForSession(sessionId: number, reporter: NewsroomReporter): Promise<number> {
     const db = getDatabase();
     const batch = await db.select().from(batches).where(eq(batches.id, sessionId)).get();
-    // Only build the newsroom once processing finished (REVIEW stage).
-    if (!batch || (batch.sessionStage !== 'REVIEW' && batch.sessionStage !== 'COMMITTED')) return 0;
+    // Build it once note processing is complete. It is displayed only after
+    // Apply moves the session to the NEWSROOM (stage 5) state.
+    if (!batch || !['REVIEW', 'COMMITTED', 'NEWSROOM'].includes(batch.sessionStage)) return 0;
 
     const noteRows = await db
       .select()
@@ -101,34 +101,49 @@ export class NewsroomService {
       const actionableInsights = destInsights.filter((r) => r.proposedAction !== 'NO_CHANGE');
       const noActionable = actionableNotes.length === 0 && actionableInsights.length === 0;
 
+      const topics = [
+        ...new Set(
+          destNotes
+            .map((r) => topicByAudio.get(r.audioId))
+            .concat(destInsights.map((r) => topicByAudio.get(r.audioId)))
+            .filter((t): t is string => !!t),
+        ),
+      ].slice(0, 5);
+
+      const destinationName = nameById.get(destinationId) ?? 'مقصد';
       let content: string;
       let storiesJson: string | null = null;
-      if (noActionable) {
-        content = this.buildNoNewsText(destNotes, topicByAudio);
-      } else if (!apiKey || !modelId) {
+
+      if (!apiKey || !modelId) {
         // Config missing — fall back to a safe, deterministic summary so the
         // newsroom never blocks processing. It is recomputed on retry.
-        content = this.buildFallbackSummary(actionableNotes, actionableInsights, nameById.get(destinationId));
+        content = noActionable
+          ? this.buildNoNewsText(topics)
+          : this.buildFallbackSummary(actionableNotes, actionableInsights, destinationName);
       } else {
-        const payload = await this.buildPayload(
-          destinationId,
-          nameById.get(destinationId) ?? 'مقصد',
-          destNotes,
-          destInsights,
-        );
+        const payload = await this.buildPayload(destinationId, destinationName, destNotes, destInsights, topics);
         try {
           const result = await reporter.generateNewsroom({ apiKey, modelId, payload });
-          if (result.stories.length > 0) {
+          if (result.stories.length > 0 && !noActionable) {
             storiesJson = JSON.stringify(result.stories);
             content = '';
+          } else if (result.noNewsReason?.trim()) {
+            // The reporter honestly explains why there is nothing new (a call
+            // about something else, or information already recorded) — never
+            // an invented piece of news.
+            content = result.noNewsReason.trim();
           } else {
-            content = this.buildFallbackSummary(actionableNotes, actionableInsights, nameById.get(destinationId));
+            content = noActionable
+              ? this.buildNoNewsText(topics)
+              : this.buildFallbackSummary(actionableNotes, actionableInsights, destinationName);
           }
         } catch (error) {
           // A reporter failure must never block processing — degrade to the
           // deterministic summary. The newsroom is additive, not critical.
           console.error('[newsroom] reporter failed', { sessionId, destinationId, err: error });
-          content = this.buildFallbackSummary(actionableNotes, actionableInsights, nameById.get(destinationId));
+          content = noActionable
+            ? this.buildNoNewsText(topics)
+            : this.buildFallbackSummary(actionableNotes, actionableInsights, destinationName);
         }
       }
 
@@ -166,7 +181,20 @@ export class NewsroomService {
       destinationName: row.destinationName,
       content: row.content,
       stories: this.parseStories(row.storiesJson),
+      reason: this.reasonFor(row.content, row.storiesJson),
     }));
+  }
+
+  /**
+   * Explain why a destination has no editorial stories: either the stored
+   * plain text is the deterministic "no new info" note, or the stored JSON
+   * was malformed/empty and we can only report that nothing was produced.
+   */
+  private reasonFor(content: string, storiesJson: string | null): string | null {
+    const stories = this.parseStories(storiesJson);
+    if (stories.length > 0) return null;
+    if (content.trim().length > 0) return content.trim();
+    return 'برای این مقصد محتوای خبری تولید نشد.';
   }
 
   /** Parse stored JSON stories defensively — malformed data degrades to empty. */
@@ -175,14 +203,37 @@ export class NewsroomService {
     try {
       const parsed = JSON.parse(storiesJson) as unknown;
       if (!Array.isArray(parsed)) return [];
-      return parsed.filter(
-        (story): story is NewsroomStory =>
-          typeof story === 'object' &&
-          story !== null &&
-          typeof story.headline === 'string' &&
-          Array.isArray(story.paragraphs) &&
-          story.paragraphs.every((p: unknown) => typeof p === 'string'),
-      );
+      const stories: NewsroomStory[] = [];
+      for (const item of parsed) {
+        if (
+          typeof item !== 'object' ||
+          item === null ||
+          typeof item.headline !== 'string' ||
+          !Array.isArray(item.paragraphs) ||
+          !item.paragraphs.every((p: unknown) => typeof p === 'string')
+        ) {
+          continue;
+        }
+        const headline = item.headline.trim();
+        const rawParagraphs = item.paragraphs as unknown[];
+        const paragraphs = [
+          ...new Set(
+            rawParagraphs
+              .filter((p): p is string => typeof p === 'string')
+              .map((p) => p.trim())
+              .filter((p) => p.length > 0),
+          ),
+        ];
+        if (!headline || paragraphs.length === 0) continue;
+        if (stories.some((story) => story.headline.trim() === headline)) continue;
+        stories.push({
+          headline,
+          paragraphs,
+          subheading: typeof item.subheading === 'string' && item.subheading.trim() ? item.subheading.trim() : null,
+        });
+        if (stories.length >= 3) break;
+      }
+      return stories;
     } catch {
       return [];
     }
@@ -193,6 +244,7 @@ export class NewsroomService {
     destinationName: string,
     noteRows: (typeof noteProposals.$inferSelect)[],
     insightRows: (typeof insightProposals.$inferSelect)[],
+    conversationTopics: string[],
   ): Promise<NewsroomPayload> {
     const db = getDatabase();
     const sourceVoiceCount = new Set(noteRows.map((r) => r.audioId).concat(insightRows.map((r) => r.audioId))).size;
@@ -254,6 +306,7 @@ export class NewsroomService {
     return {
       destination: destinationName,
       sourceVoiceCount,
+      conversationTopics,
       newNotes,
       updatedNotes,
       outdatedNotes: markedOutdated,
@@ -261,15 +314,11 @@ export class NewsroomService {
     };
   }
 
-  /** Deterministic "nothing new" narrative (optionally grounded with topics). */
-  private buildNoNewsText(
-    noteRows: (typeof noteProposals.$inferSelect)[],
-    topicByAudio: Map<number, string>,
-  ): string {
-    const topics = [...new Set(noteRows.map((r) => topicByAudio.get(r.audioId)).filter((t): t is string => !!t))];
+  /** Deterministic "nothing new" fallback (optionally grounded with topics). */
+  private buildNoNewsText(topics: string[]): string {
     if (topics.length === 0) return NO_NEWS_TEXT;
     const joined = topics.slice(0, 3).join('، ');
-    return `${NO_NEWS_TEXT} موضوع اصلی تماس‌ها: ${joined}.`;
+    return `${NO_NEWS_TEXT} موضوعات مطرح‌شده: ${joined}.`;
   }
 
   /** Safe deterministic fallback when Gemini config is missing. */
@@ -288,7 +337,7 @@ export class NewsroomService {
     if (outdatedCount > 0) parts.push(`${outdatedCount} نکته قدیمی شد`);
     if (insightCount > 0) parts.push(`${insightCount} دغدغه جدید`);
     if (parts.length === 0) return NO_NEWS_TEXT;
-    return `در این پردازش برای مقصد «${destinationName ?? 'مقصد'}» ${parts.join('، ')} ثبت شد.`;
+    return `برای مقصد «${destinationName ?? 'مقصد'}»، ${parts.join('، ')} ثبت شد.`;
   }
 }
 

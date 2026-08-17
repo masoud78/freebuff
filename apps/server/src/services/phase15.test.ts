@@ -54,6 +54,7 @@ function extraction(overrides: Partial<NoteExtraction> = {}): NoteExtraction {
 class NoteGateway implements GeminiGatewayLike {
   newsroomPayloads: NewsroomPayload[] = [];
   newsroomText = 'در این پردازش اطلاعات جدیدی ثبت شد.';
+  noNewsReason: string | null = null;
 
   constructor(private readonly output: NoteExtraction = extraction()) {}
 
@@ -90,6 +91,7 @@ class NoteGateway implements GeminiGatewayLike {
     this.newsroomPayloads.push(input.payload);
     return {
       stories: [{ headline: 'عنوان خبر', paragraphs: [this.newsroomText] }],
+      noNewsReason: this.noNewsReason,
       usage: ZERO_USAGE,
       durationMs: 1,
     };
@@ -416,7 +418,7 @@ test('the same concern across two voices dedups to one insight with two sources'
 // Processing newsroom (§64-66)
 // ---------------------------------------------------------------------------
 
-test('existing knowledge only → newsroom reports no meaningful new information (reporter not called)', async () => {
+test('existing knowledge only → newsroom explains why instead of inventing a story', async () => {
   const first = await sessionTranscribed();
   const note = {
     title: 'صبحانه هتل',
@@ -432,15 +434,16 @@ test('existing knowledge only → newsroom reports no meaningful new information
 
   const second = await sessionTranscribed();
   const gateway = new NoteGateway(extraction({ notes: [note] }));
+  gateway.noNewsReason = 'این تماس دربارهٔ موضوعی بود که اطلاعات آن قبلاً در دیتابیس ثبت شده است.';
   await processTranscript(second.transcriptId, second.sessionId, gateway);
 
-  assert.equal(gateway.newsroomPayloads.length, 0, 'no Gemini call for a no-change newsroom');
+  assert.equal(gateway.newsroomPayloads.length, 1, 'reporter is asked for the honest no-news reason');
   const news = await getDatabase()
     .select()
     .from(processingDestinationNews)
     .where(eq(processingDestinationNews.processingSessionId, second.sessionId));
   assert.equal(news.length, 1);
-  assert.ok(news[0]?.content.includes('تازه یا تغییر معناداری'));
+  assert.ok(news[0]?.content.includes('قبلاً در دیتابیس ثبت شده است'));
   assert.ok(!news[0]?.content.includes('صبحانه هتل X بوفه است'));
 });
 

@@ -86,6 +86,29 @@ function windowsSystemProxy(): string | null {
 }
 
 /**
+ * undici v8's ProxyAgent breaks when a request carries an explicit
+ * `Content-Length` header (the @google/genai SDK sets one for its resumable
+ * file upload): converting the header list to an object empties the value and
+ * the dispatcher then rejects it with "invalid content-length header". The
+ * header is redundant anyway — undici computes it from the body — so strip it
+ * from requests that have a body and let undici set it. Idempotent.
+ */
+let fetchPatched = false;
+function installUploadHeaderFix(): void {
+  if (fetchPatched) return;
+  fetchPatched = true;
+  const originalFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = (input, init) => {
+    if (init?.body != null) {
+      const headers = new Headers(init.headers ?? undefined);
+      headers.delete('content-length');
+      return originalFetch(input, { ...init, headers });
+    }
+    return originalFetch(input, init);
+  };
+}
+
+/**
  * Install the best available proxy as undici's global dispatcher.
  * Safe to call once at startup; returns what was applied (or why not) so the
  * caller can log it.
@@ -101,6 +124,7 @@ export function setupOutboundProxy(): ProxySetup {
     try {
       // Honors HTTPS_PROXY/HTTP_PROXY/NO_PROXY from the environment.
       setGlobalDispatcher(new EnvHttpProxyAgent());
+      installUploadHeaderFix();
       return { enabled: true, source: 'env', url: envUrl };
     } catch (error) {
       return { enabled: false, source: 'env', url: envUrl, detail: `failed to build proxy agent: ${String(error)}` };
@@ -111,6 +135,7 @@ export function setupOutboundProxy(): ProxySetup {
   if (registryUrl) {
     try {
       setGlobalDispatcher(new ProxyAgent({ uri: registryUrl }));
+      installUploadHeaderFix();
       return { enabled: true, source: 'windows-registry', url: registryUrl };
     } catch (error) {
       return {

@@ -16,11 +16,16 @@ const HOST = process.env.HOST ?? '127.0.0.1';
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
 try {
-  // Route outbound traffic (Gemini API calls) through the system proxy if one
-  // is configured — env vars first, then the Windows system proxy.
+  // Route outbound traffic through the system proxy if one is configured —
+  // env vars first, then the Windows system proxy. Every Gemini API call in
+  // this process (models list, transcription, file upload, knowledge, content,
+  // embeddings) uses the SDK's global fetch, so this one dispatcher covers all
+  // of them.
   const proxy = setupOutboundProxy();
   if (proxy.enabled) {
-    console.log(`[proxy] enabled (${proxy.source}): ${proxy.url}`);
+    console.log(
+      `[proxy] enabled (${proxy.source}): ${proxy.url} — all outbound Gemini API traffic routes through this proxy`,
+    );
   } else if (proxy.detail) {
     console.log(`[proxy] disabled (${proxy.source}): ${proxy.detail}`);
   }
