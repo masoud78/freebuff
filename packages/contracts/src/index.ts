@@ -52,6 +52,7 @@ export type SettingsErrorCode = (typeof settingsErrorCodes)[number];
 export const geminiErrorCodes = [
   'GEMINI_NOT_CONFIGURED',
   'GEMINI_AUTH_ERROR',
+  'GEMINI_FORBIDDEN',
   'GEMINI_NETWORK_ERROR',
   'GEMINI_RATE_LIMIT',
   'GEMINI_API_ERROR',
@@ -152,6 +153,8 @@ export interface ApiErrorResponse {
   error: {
     code: ApiErrorCode;
     message: string;
+    /** Precise underlying reason (sanitized, e.g. Google's own message). */
+    detail?: string;
   };
 }
 
@@ -159,12 +162,13 @@ export interface ApiErrorResponse {
 // Gemini credentials
 // ---------------------------------------------------------------------------
 
-export const geminiCredentialStatuses = ['NOT_CONFIGURED', 'CONFIGURED', 'INVALID'] as const;
+export const geminiCredentialStatuses = ['NOT_CONFIGURED', 'CONFIGURED', 'INVALID', 'BLOCKED'] as const;
 export type GeminiCredentialStatus = (typeof geminiCredentialStatuses)[number];
 
 export const geminiTestOutcomes = [
   'success',
   'auth_error',
+  'blocked',
   'network_error',
   'rate_limit',
   'api_error',

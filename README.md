@@ -85,7 +85,7 @@ Batch Knowledge Delta (NEW/UPDATE) → Content Generation → COMPLETED
 ## امنیت کلید Gemini
 
 - کلید API در `workspace/system/secrets/gemini.key` (خارج از Git) ذخیره می‌شود — نه در SQLite و نه در localStorage مرورگر.
-- کلید هرگز در پاسخ‌های API یا Logها ظاهر نمی‌شود؛ فقط وضعیت (تنظیم نشده / پیکربندی‌شده / نامعتبر) به UI می‌رسد.
+- کلید هرگز در پاسخ‌های API یا Logها ظاهر نمی‌شود؛ فقط وضعیت (تنظیم نشده / پیکربندی‌شده / نامعتبر / دسترسی مسدود) به UI می‌رسد.
 
 ## قراردادها
 

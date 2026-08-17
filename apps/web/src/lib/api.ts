@@ -50,20 +50,24 @@ import { API_BASE_URL } from './env';
 
 const GENERIC_ERROR = 'خطای غیرمنتظره رخ داد. دوباره تلاش کنید.';
 
-/** Error carrying the API error code and a user-facing message. */
+/** Error carrying the API error code, a user-facing message and (when the
+ * backend has it) the precise underlying reason — e.g. Google's own message. */
 export class ApiError extends Error {
   readonly code: ApiErrorCode | null;
+  readonly detail: string | null;
 
-  constructor(message: string, code: ApiErrorCode | null) {
+  constructor(message: string, code: ApiErrorCode | null, detail: string | null = null) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
+    this.detail = detail;
   }
 }
 
 async function parseError(response: Response): Promise<ApiError> {
   let message = GENERIC_ERROR;
   let code: ApiErrorCode | null = null;
+  let detail: string | null = null;
   try {
     const body = (await response.json()) as ApiErrorResponse;
     if (body.error?.message) {
@@ -72,10 +76,13 @@ async function parseError(response: Response): Promise<ApiError> {
     if (body.error?.code) {
       code = body.error.code;
     }
+    if (body.error?.detail) {
+      detail = body.error.detail;
+    }
   } catch {
     // Non-JSON error body — keep the generic message.
   }
-  return new ApiError(message, code);
+  return new ApiError(message, code, detail);
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {

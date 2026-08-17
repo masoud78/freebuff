@@ -160,6 +160,8 @@ export interface NewsroomPayload {
 /**
  * Error thrown by the Gemini gateway. `code` is a stable, normalized
  * `GeminiErrorCode`; `message` is a safe, user-facing Persian message.
+ * `detail` (when present) is the precise underlying reason from Google —
+ * sanitized so an API key can never leak into it.
  * The API key never appears in the message or in the logged cause chain.
  * Extends DomainError so API routes map it to a controlled 400 response.
  * `retryable` tells the job engine whether a retry makes sense.
@@ -167,21 +169,53 @@ export interface NewsroomPayload {
 export class GeminiGatewayError extends DomainError {
   readonly retryable: boolean;
   readonly durationMs: number | null;
+  readonly detail: string | null;
 
   constructor(
     code: GeminiErrorCode,
     message: string,
-    options?: { cause?: unknown; retryable?: boolean; durationMs?: number },
+    options?: { cause?: unknown; retryable?: boolean; durationMs?: number; detail?: string | null },
   ) {
     super(code, message, options);
     this.name = 'GeminiGatewayError';
     this.retryable = options?.retryable ?? (code === 'GEMINI_RATE_LIMIT' || code === 'GEMINI_NETWORK_ERROR');
     this.durationMs = options?.durationMs ?? null;
+    this.detail = options?.detail ?? null;
   }
 }
 
-const API_KEY_MESSAGE = /api key|apikey|invalid key|permission denied|unauthorized/i;
+/** Messages that really mean "the key itself was rejected". */
+const API_KEY_MESSAGE = /api key|apikey|invalid key/i;
+/** Messages that mean "authenticated but not allowed" (region, restriction, permission). */
+const ACCESS_MESSAGE =
+  /permission denied|unauthorized|forbidden|user location|unsupported (country|region)|not supported for the api|geofenc|restricted|blocked|not enabled/i;
 const NETWORK_MESSAGE = /fetch failed|socket|econn|etimedout|enotfound|eai_again|tls/i;
+
+const DETAIL_MAX_LENGTH = 300;
+
+/** Pull Google's human-readable reason out of the raw (possibly JSON) message. */
+function extractReadable(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as { error?: { message?: string } };
+    if (parsed?.error?.message) return parsed.error.message;
+  } catch {
+    // Not JSON — use the raw text as-is.
+  }
+  return raw;
+}
+
+/**
+ * Sanitize a raw detail string: redact anything that looks like an API key
+ * and cap the length so a runaway server message never floods the UI.
+ */
+function sanitizeDetail(raw: string): string | null {
+  const cleaned = raw
+    .replace(/AIza[0-9A-Za-z_\-]{20,}/g, '[REDACTED]')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return null;
+  return cleaned.length > DETAIL_MAX_LENGTH ? `${cleaned.slice(0, DETAIL_MAX_LENGTH)}…` : cleaned;
+}
 
 /** Map any SDK/network failure to a normalized GeminiGatewayError. */
 export function toGeminiGatewayError(error: unknown): GeminiGatewayError {
@@ -189,27 +223,56 @@ export function toGeminiGatewayError(error: unknown): GeminiGatewayError {
 
   if (error instanceof ApiError) {
     const status = error.status;
-    const raw = String(error.message);
+    const detail = sanitizeDetail(extractReadable(String(error.message)));
 
-    if (status === 401 || status === 403 || (status === 400 && API_KEY_MESSAGE.test(raw))) {
+    // 401 = the key itself was rejected. Genuinely invalid key.
+    if (status === 401) {
       return new GeminiGatewayError(
         'GEMINI_AUTH_ERROR',
         'کلید API نامعتبر است. کلید جدیدی وارد کنید.',
-        { cause: error },
+        { cause: error, detail },
       );
+    }
+    // 403 = authenticated but not allowed: region block (e.g. Iran), key
+    // restrictions (IP/referrer) or the API not enabled on the project.
+    // A valid key can absolutely hit this — it is NOT an invalid-key error.
+    if (status === 403) {
+      return new GeminiGatewayError(
+        'GEMINI_FORBIDDEN',
+        'گوگل دسترسی به Gemini API را رد کرد. کلید ممکن است سالم باشد؛ علت معمولاً مسدودیت منطقه‌ای، محدودیت کلید (IP/مرجع) یا فعال نبودن API است.',
+        { cause: error, detail },
+      );
+    }
+    // 400: the body decides — a key message means a bad key; an access
+    // message (e.g. "user location is not supported") means blocked.
+    if (status === 400) {
+      if (API_KEY_MESSAGE.test(detail ?? '')) {
+        return new GeminiGatewayError(
+          'GEMINI_AUTH_ERROR',
+          'کلید API نامعتبر است. کلید جدیدی وارد کنید.',
+          { cause: error, detail },
+        );
+      }
+      if (ACCESS_MESSAGE.test(detail ?? '')) {
+        return new GeminiGatewayError(
+          'GEMINI_FORBIDDEN',
+          'گوگل دسترسی به Gemini API را رد کرد. کلید ممکن است سالم باشد؛ علت معمولاً مسدودیت منطقه‌ای، محدودیت کلید (IP/مرجع) یا فعال نبودن API است.',
+          { cause: error, detail },
+        );
+      }
     }
     if (status === 429) {
       return new GeminiGatewayError(
         'GEMINI_RATE_LIMIT',
         'محدودیت نرخ درخواست Gemini فعال شد. کمی بعد دوباره تلاش کنید.',
-        { cause: error },
+        { cause: error, detail },
       );
     }
     // Transient 5xx errors are safe to retry; permanent 4xx are not.
     return new GeminiGatewayError(
       'GEMINI_API_ERROR',
       'ارتباط با Gemini با خطا مواجه شد. وضعیت سرویس را بررسی کنید.',
-      { cause: error, retryable: status >= 500 },
+      { cause: error, retryable: status >= 500, detail },
     );
   }
 
@@ -219,7 +282,7 @@ export function toGeminiGatewayError(error: unknown): GeminiGatewayError {
       return new GeminiGatewayError(
         'GEMINI_NETWORK_ERROR',
         'ارتباط با سرورهای Gemini برقرار نشد. اتصال اینترنت را بررسی کنید.',
-        { cause: error },
+        { cause: error, detail: sanitizeDetail(raw) },
       );
     }
   }
@@ -227,7 +290,7 @@ export function toGeminiGatewayError(error: unknown): GeminiGatewayError {
   return new GeminiGatewayError(
     'GEMINI_API_ERROR',
     'خطای غیرمنتظره‌ای در ارتباط با Gemini رخ داد.',
-    { cause: error },
+    { cause: error, detail: error instanceof Error ? sanitizeDetail(`${error.name} ${String(error.message)}`) : null },
   );
 }
 
@@ -346,6 +409,7 @@ export class GeminiGateway {
         cause: normalized.cause,
         retryable: normalized.retryable,
         durationMs: Date.now() - started,
+        detail: normalized.detail,
       });
     } finally {
       // The remote file is temporary — release it regardless of outcome.
@@ -452,6 +516,7 @@ export class GeminiGateway {
         cause: normalized.cause,
         retryable: normalized.retryable,
         durationMs: Date.now() - started,
+        detail: normalized.detail,
       });
     }
   }
@@ -542,6 +607,7 @@ export class GeminiGateway {
         cause: normalized.cause,
         retryable: normalized.retryable,
         durationMs: Date.now() - started,
+        detail: normalized.detail,
       });
     }
   }
@@ -649,6 +715,7 @@ export class GeminiGateway {
         cause: normalized.cause,
         retryable: normalized.retryable,
         durationMs: Date.now() - started,
+        detail: normalized.detail,
       });
     }
   }
@@ -768,6 +835,7 @@ export class GeminiGateway {
         cause: normalized.cause,
         retryable: normalized.retryable,
         durationMs: Date.now() - started,
+        detail: normalized.detail,
       });
     }
   }
@@ -831,6 +899,7 @@ export class GeminiGateway {
         cause: normalized.cause,
         retryable: normalized.retryable,
         durationMs: Date.now() - started,
+        detail: normalized.detail,
       });
     }
   }
@@ -874,6 +943,7 @@ export class GeminiGateway {
         cause: normalized.cause,
         retryable: normalized.retryable,
         durationMs: Date.now() - started,
+        detail: normalized.detail,
       });
     }
   }
@@ -945,6 +1015,7 @@ export class GeminiGateway {
         cause: normalized.cause,
         retryable: normalized.retryable,
         durationMs: Date.now() - started,
+        detail: normalized.detail,
       });
     }
   }

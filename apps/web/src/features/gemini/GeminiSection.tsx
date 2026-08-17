@@ -13,6 +13,8 @@ const STATUS_LABELS: Record<string, { tone: StatusTone; label: string }> = {
   NOT_CONFIGURED: NOT_CONFIGURED_INFO,
   CONFIGURED: { tone: 'success', label: 'پیکربندی شده' },
   INVALID: { tone: 'danger', label: 'نامعتبر' },
+  // Key is fine, but Google refuses requests from this system/region.
+  BLOCKED: { tone: 'danger', label: 'دسترسی مسدود' },
 };
 
 const INPUT_CLASSES =
@@ -58,6 +60,7 @@ export function GeminiSection() {
   const statusInfo = status ? (STATUS_LABELS[status.status] ?? NOT_CONFIGURED_INFO) : NOT_CONFIGURED_INFO;
   const configured = status?.status === 'CONFIGURED';
   const invalid = status?.status === 'INVALID';
+  const blocked = status?.status === 'BLOCKED';
 
   return (
     <div className="space-y-5">
@@ -125,6 +128,11 @@ export function GeminiSection() {
         )}
         {invalid && (
           <span className="text-xs text-danger">کلید قبلی نامعتبر است؛ کلید جدید وارد کنید.</span>
+        )}
+        {blocked && (
+          <span className="text-xs text-danger">
+            کلید قبلی معتبر است اما گوگل از این سیستم دسترسی نمی‌دهد (مسدودیت منطقه‌ای، محدودیت کلید یا API غیرفعال).
+          </span>
         )}
       </div>
 

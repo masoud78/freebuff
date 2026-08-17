@@ -46,13 +46,13 @@ const MOCK_MODELS: GeminiModelInfo[] = [
 class MockGateway implements GeminiGatewayLike {
   constructor(
     private readonly models: GeminiModelInfo[],
-    private readonly failTest = false,
+    private readonly failStatus: number | null = null,
   ) {}
 
   async testConnection(): Promise<void> {
-    if (this.failTest) {
+    if (this.failStatus !== null) {
       // Emulate the real gateway contract: normalized errors only.
-      throw toGeminiGatewayError(new ApiError({ status: 401, message: 'unauthorized' }));
+      throw toGeminiGatewayError(new ApiError({ status: this.failStatus, message: 'unauthorized' }));
     }
   }
 
@@ -167,7 +167,7 @@ test('successful connection test records outcome and timestamp', async () => {
 });
 
 test('failed connection test normalizes the error and marks the credential INVALID', async () => {
-  const failing = new GeminiService(new MockGateway(MOCK_MODELS, true));
+  const failing = new GeminiService(new MockGateway(MOCK_MODELS, 401));
   await failing.saveApiKey('bad-key-xyz');
   await assert.rejects(
     () => failing.testConnection(),
@@ -176,6 +176,18 @@ test('failed connection test normalizes the error and marks the credential INVAL
   const status = await failing.getCredentialStatus();
   assert.equal(status.status, 'INVALID');
   assert.equal(status.lastTestOutcome, 'auth_error');
+});
+
+test('a 403 (region/restriction) marks the credential BLOCKED, not INVALID', async () => {
+  const blocked = new GeminiService(new MockGateway(MOCK_MODELS, 403));
+  await blocked.saveApiKey('ok-key-abc');
+  await assert.rejects(
+    () => blocked.testConnection(),
+    (error) => error instanceof GeminiGatewayError && error.code === 'GEMINI_FORBIDDEN',
+  );
+  const status = await blocked.getCredentialStatus();
+  assert.equal(status.status, 'BLOCKED');
+  assert.equal(status.lastTestOutcome, 'blocked');
 });
 
 test('gemini errors map to controlled 400 API responses', () => {
@@ -210,6 +222,22 @@ test('gemini errors are normalized to stable codes', () => {
       }),
       'GEMINI_AUTH_ERROR',
     ],
+    // A valid key can still be blocked: 403 (or a 400 body mentioning
+    // location/permission) must never be reported as an invalid key.
+    [
+      new ApiError({
+        status: 403,
+        message: '{"error":{"message":"User location is not supported for the API use."}}',
+      }),
+      'GEMINI_FORBIDDEN',
+    ],
+    [
+      new ApiError({
+        status: 400,
+        message: '{"error":{"message":"User location is not supported for the API use."}}',
+      }),
+      'GEMINI_FORBIDDEN',
+    ],
     [new ApiError({ status: 429, message: 'rate limit exceeded' }), 'GEMINI_RATE_LIMIT'],
     [new ApiError({ status: 500, message: 'internal error' }), 'GEMINI_API_ERROR'],
     [
@@ -223,6 +251,27 @@ test('gemini errors are normalized to stable codes', () => {
     assert.ok(normalized instanceof GeminiGatewayError);
     assert.equal(normalized.code, expected);
   }
+});
+
+test('normalized errors carry a precise, sanitized detail', () => {
+  const normalized = toGeminiGatewayError(
+    new ApiError({
+      status: 403,
+      message: '{"error":{"message":"User location is not supported for the API use."}}',
+    }),
+  );
+  assert.equal(normalized.code, 'GEMINI_FORBIDDEN');
+  assert.ok(normalized.detail?.includes('User location is not supported'), 'detail keeps Google\'s reason');
+});
+
+test('normalized detail never leaks an API key', () => {
+  const key = `AIzaSy${'x'.repeat(30)}`;
+  const normalized = toGeminiGatewayError(
+    new ApiError({ status: 403, message: `blocked request for ${key}` }),
+  );
+  assert.ok(normalized.detail !== null);
+  assert.ok(!normalized.detail.includes('AIza'), 'detail must redact the key');
+  assert.ok(normalized.detail.includes('[REDACTED]'));
 });
 
 test('normalized errors never contain the API key', () => {

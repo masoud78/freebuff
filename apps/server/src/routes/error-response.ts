@@ -13,7 +13,10 @@ export function toErrorResponse(reply: FastifyReply, error: unknown): ApiErrorRe
   if (error instanceof DomainError) {
     const status = error.code === 'DATABASE_ERROR' ? 500 : 400;
     reply.code(status);
-    return { error: { code: error.code, message: error.message } };
+    // Precise underlying reason (sanitized upstream) is passed through when
+    // present, so clients can explain the failure without guessing.
+    const detail = (error as { detail?: string | null }).detail;
+    return { error: { code: error.code, message: error.message, ...(detail ? { detail } : {}) } };
   }
   if (error instanceof DatabaseError) {
     reply.code(500);

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { GeminiCredentialStatusResponse } from '@freebuff/contracts';
-import { deleteApiKey, fetchCredentialStatus, saveApiKey, testGeminiConnection } from '../../lib/api';
+import { ApiError, deleteApiKey, fetchCredentialStatus, saveApiKey, testGeminiConnection } from '../../lib/api';
 
 export interface SectionMessage {
   tone: 'success' | 'error';
@@ -74,11 +74,20 @@ export function useGeminiCredentials() {
       setStatus(result);
       setMessage({ tone: 'success', text: result.message });
     } catch (error) {
-      const text = error instanceof Error ? error.message : 'اتصال ناموفق بود.';
+      // Show the precise underlying reason (Google's own message) when the
+      // backend provides it — a raw "invalid key" guess is never enough.
+      const text =
+        error instanceof ApiError && error.detail
+          ? `${error.message} — ${error.detail}`
+          : error instanceof Error
+            ? error.message
+            : 'اتصال ناموفق بود.';
       setMessage({ tone: 'error', text });
       const code = error instanceof Error && 'code' in error ? (error as { code: string }).code : null;
-      if (code === 'GEMINI_AUTH_ERROR' || code === 'GEMINI_NOT_CONFIGURED') {
-        setStatus((prev) => (prev ? { ...prev, status: code === 'GEMINI_AUTH_ERROR' ? 'INVALID' : 'NOT_CONFIGURED' } : prev));
+      if (code === 'GEMINI_AUTH_ERROR' || code === 'GEMINI_FORBIDDEN' || code === 'GEMINI_NOT_CONFIGURED') {
+        const status =
+          code === 'GEMINI_AUTH_ERROR' ? 'INVALID' : code === 'GEMINI_FORBIDDEN' ? 'BLOCKED' : 'NOT_CONFIGURED';
+        setStatus((prev) => (prev ? { ...prev, status } : prev));
       }
     } finally {
       setIsTesting(false);

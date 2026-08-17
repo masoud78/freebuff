@@ -45,8 +45,11 @@ export class GeminiService {
 
     let status: GeminiCredentialStatus = 'NOT_CONFIGURED';
     if (key) {
-      // A stored key whose last test failed with an auth error is INVALID.
-      status = lastTestOutcome === 'auth_error' ? 'INVALID' : 'CONFIGURED';
+      // A rejected key is INVALID; a valid-but-blocked key (region,
+      // restriction, disabled API) is BLOCKED — not "invalid".
+      if (lastTestOutcome === 'auth_error') status = 'INVALID';
+      else if (lastTestOutcome === 'blocked') status = 'BLOCKED';
+      else status = 'CONFIGURED';
     }
     return toStatusResponse(status, lastTestedAt, lastTestOutcome);
   }
@@ -159,6 +162,8 @@ function outcomeFromGatewayError(error: unknown): GeminiTestOutcome {
     switch (error.code) {
       case 'GEMINI_AUTH_ERROR':
         return 'auth_error';
+      case 'GEMINI_FORBIDDEN':
+        return 'blocked';
       case 'GEMINI_NETWORK_ERROR':
         return 'network_error';
       case 'GEMINI_RATE_LIMIT':
